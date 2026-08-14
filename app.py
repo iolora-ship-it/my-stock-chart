@@ -6,13 +6,14 @@
     streamlit run app.py
 
 必要なライブラリ (初回のみ):
-    pip install streamlit yfinance plotly pandas
+    pip install -r requirements.txt
 
 機能:
+  - トップに日経平均・SOX指数・ドル円・米国10年金利、CPI(日米)を表示（用語説明つき）
   - stocks.csv に登録した銘柄をセクターごとに一覧・比較
-  - 「前日比」ではなく、任意の期間を指定してトータルの騰落率(%)を表示
-  - ローソク足チャートにカーソルを合わせると、その時点のOHLC株価を表示
-  - 決算発表日をチャート上・一覧表の両方で確認できる
+  - 1日〜1年まで細かく期間を指定してトータルの騰落率(%)を表示
+  - 大きなローソク足チャート。クリックした地点の株価をピン留め表示
+  - 決算発表日をカード・カレンダー表の両方で確認できる
 """
 
 import datetime as dt
@@ -27,6 +28,8 @@ st.set_page_config(page_title="My Stock Chart", layout="wide", page_icon="📈")
 STOCKS_CSV = "stocks.csv"
 
 PERIOD_PRESETS = {
+    "1日": 1,
+    "3日": 3,
     "5日": 5,
     "10日": 10,
     "20日": 20,
@@ -40,9 +43,57 @@ UP_COLOR = "#e5484d"
 DOWN_COLOR = "#0d6efd"
 NEUTRAL_COLOR = "#8a8f98"
 
+MARKET_INDICATORS = [
+    {
+        "ticker": "^N225",
+        "label": "日経平均株価",
+        "unit": "円",
+        "decimals": 0,
+        "divide": 1,
+        "help": "東証プライム市場の代表225銘柄の平均株価。日本株市場全体の値動きを示す最も基本的な指標です。",
+    },
+    {
+        "ticker": "^SOX",
+        "label": "SOX指数",
+        "unit": "pt",
+        "decimals": 1,
+        "divide": 1,
+        "help": "フィラデルフィア半導体指数。米国の主要な半導体関連企業で構成され、半導体セクター全体の勢いを示します。前日の米国市場の値が表示されます。",
+    },
+    {
+        "ticker": "JPY=X",
+        "label": "ドル円",
+        "unit": "円",
+        "decimals": 2,
+        "divide": 1,
+        "help": "1米ドル＝何円かを示す為替レート。円安（数値が大きくなる）は輸出企業に有利、円高は輸入企業に有利とされます。",
+    },
+    {
+        "ticker": "^TNX",
+        "label": "米国10年金利",
+        "unit": "%",
+        "decimals": 2,
+        "divide": 10,
+        "help": "米国財務省が発行する10年物国債の利回り。世界の金利・株式市場に影響する重要指標です。上昇は株価にマイナスに働きやすいとされます。",
+    },
+]
+
+CPI_SERIES = [
+    {
+        "series_id": "CPIAUCSL",
+        "label": "米国CPI（前年比）",
+        "help": "米国消費者物価指数の前年同月比。インフレの強さを示し、FRB（米国の中央銀行）の利上げ・利下げ判断材料になります。",
+    },
+    {
+        "series_id": "JPNCPIALLMINMEI",
+        "label": "日本CPI（前年比）",
+        "help": "日本の消費者物価指数の前年同月比。日銀の金融政策判断や、生活実感としての物価上昇率の目安になります。",
+    },
+]
+
 
 # ---------------------------------------------------------------------------
-# 見た目（配色・レイアウト・フォント）
+# 見た目（配色・レイアウト・フォント・アニメーション）
 # ---------------------------------------------------------------------------
 def inject_style():
     st.markdown(
@@ -54,10 +105,22 @@ def inject_style():
             font-family: 'Noto Sans JP', sans-serif;
         }
 
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* 背景 */
+        [data-testid="stAppViewContainer"] {
+            background: linear-gradient(180deg, #f7f8fc 0%, #eef1f8 100%);
+        }
+
         /* サイドバー */
         section[data-testid="stSidebar"] {
-            background-color: #f7f8fa;
-            border-right: 1px solid #e7e9ec;
+            background-color: #12131a;
+        }
+        section[data-testid="stSidebar"] * {
+            color: #e8e9ee !important;
         }
         section[data-testid="stSidebar"] .stRadio label,
         section[data-testid="stSidebar"] .stSelectbox label,
@@ -66,10 +129,44 @@ def inject_style():
             font-size: 0.95rem;
         }
 
-        /* メインタイトル */
-        h1 {
+        /* ヘッダー帯 */
+        .app-header {
+            background: linear-gradient(120deg, #14192b 0%, #262f4a 60%, #3a2b57 100%);
+            border-radius: 18px;
+            padding: 22px 28px;
+            margin-bottom: 18px;
+            animation: fadeInUp 0.5s ease;
+            box-shadow: 0 8px 24px rgba(20, 25, 43, 0.25);
+        }
+        .app-header h1 {
+            color: #ffffff !important;
             font-weight: 900 !important;
+            font-size: 1.7rem;
+            margin-bottom: 2px;
             letter-spacing: -0.02em;
+        }
+        .app-header p {
+            color: #b9c0d6;
+            margin: 0;
+            font-size: 0.9rem;
+        }
+
+        /* 指標カード（市場ダッシュボード） */
+        div[data-testid="stMetric"] {
+            background: #ffffff;
+            border-radius: 14px;
+            padding: 14px 16px 10px 16px;
+            box-shadow: 0 1px 4px rgba(20, 20, 30, 0.06);
+            border: 1px solid #eef0f4;
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+            animation: fadeInUp 0.5s ease;
+        }
+        div[data-testid="stMetric"]:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 10px 20px rgba(20, 20, 30, 0.10);
+        }
+        div[data-testid="stMetricValue"] {
+            font-weight: 900;
         }
 
         /* タブ */
@@ -95,6 +192,12 @@ def inject_style():
             padding: 16px 20px;
             margin-bottom: 10px;
             box-shadow: 0 1px 3px rgba(20, 20, 30, 0.04);
+            transition: transform 0.12s ease, box-shadow 0.12s ease;
+            animation: fadeInUp 0.4s ease;
+        }
+        .stock-card:hover {
+            transform: translateY(-2px) scale(1.003);
+            box-shadow: 0 8px 18px rgba(20, 20, 30, 0.08);
         }
         .stock-card .name {
             font-size: 1.05rem;
@@ -128,9 +231,17 @@ def inject_style():
             color: #9aa0a6;
         }
 
-        div[data-testid="stMetricValue"] {
-            font-weight: 900;
+        /* クリックした株価のピン留め表示 */
+        .pin-price {
+            background: linear-gradient(120deg, #14192b, #262f4a);
+            color: #ffffff;
+            border-radius: 14px;
+            padding: 14px 20px;
+            margin-top: 10px;
+            animation: fadeInUp 0.3s ease;
+            font-size: 0.95rem;
         }
+        .pin-price b { font-size: 1.1rem; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -147,10 +258,9 @@ def load_master(path: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def fetch_history(code: str, start: dt.date, end: dt.date) -> pd.DataFrame:
-    """日本株のコードから .T ティッカーで日足OHLCを取得"""
-    ticker = f"{code}.T"
-    # 期間の前後に少し余裕を持たせて取得(休場日対策)
+def fetch_history(ticker_code: str, start: dt.date, end: dt.date, is_index: bool = False) -> pd.DataFrame:
+    """コードから .T ティッカーで日足OHLCを取得（指数の場合はそのままのティッカーを使用）"""
+    ticker = ticker_code if is_index else f"{ticker_code}.T"
     try:
         df = yf.download(
             ticker,
@@ -167,6 +277,50 @@ def fetch_history(code: str, start: dt.date, end: dt.date) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_index_snapshot(ticker: str, divide: float = 1):
+    """直近の値と前日比を取得"""
+    try:
+        df = yf.download(ticker, period="10d", interval="1d", progress=False, auto_adjust=False)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df = df.dropna(how="all")
+        if len(df) < 2:
+            return None, None
+        latest = float(df["Close"].iloc[-1]) / divide
+        prev = float(df["Close"].iloc[-2]) / divide
+        return latest, latest - prev
+    except Exception:
+        return None, None
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def fetch_cpi_yoy(series_id: str):
+    """FREDから物価指数を取得し、前年同月比(%)を計算する"""
+    try:
+        url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+        df = pd.read_csv(url)
+        date_col, value_col = df.columns[0], df.columns[1]
+        df[date_col] = pd.to_datetime(df[date_col])
+        df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+        df = df.dropna().sort_values(date_col)
+        if df.empty:
+            return None, None
+        latest_date = df[date_col].iloc[-1]
+        latest_val = df[value_col].iloc[-1]
+        target = latest_date - pd.DateOffset(years=1)
+        past = df[df[date_col] <= target]
+        if past.empty:
+            return None, None
+        prev_val = past[value_col].iloc[-1]
+        if prev_val == 0:
+            return None, None
+        yoy = (latest_val - prev_val) / prev_val * 100
+        return yoy, latest_date.date()
+    except Exception:
+        return None, None
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_earnings_dates(code: str) -> list:
     """決算発表日の一覧を取得(取得できない銘柄もあるためtry/exceptで保護)"""
@@ -181,7 +335,7 @@ def fetch_earnings_dates(code: str) -> list:
         return []
 
 
-def next_earnings_label(earnings_dates: list, today: dt.date) -> str:
+def next_earnings_label(earnings_dates: list, today: dt.date):
     """一覧表示用: 直近の決算発表日を「予定」「発表済」付きで返す"""
     if not earnings_dates:
         return None
@@ -195,7 +349,7 @@ def next_earnings_label(earnings_dates: list, today: dt.date) -> str:
 
 
 def pct_change_over_period(df: pd.DataFrame, start: dt.date, end: dt.date):
-    """指定期間の始値近辺の終値 → 直近終値のトータル騰落率(%)"""
+    """指定期間の始点の終値 → 直近終値のトータル騰落率(%)"""
     if df.empty:
         return None, None, None
     window = df[(df.index.date >= start) & (df.index.date <= end)]
@@ -230,10 +384,55 @@ def pct_arrow(v):
 
 
 # ---------------------------------------------------------------------------
-# サイドバー（要素を絞ってシンプルに）
+# 画面構築
 # ---------------------------------------------------------------------------
 inject_style()
 
+st.markdown(
+    """
+    <div class="app-header">
+        <h1>📈 日本株チャートビューア</h1>
+        <p>市場全体の空気を確認してから、セクター比較・個別チャートへ。数値にカーソルを合わせると（?）用語の説明が出ます。</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# --- 市場ダッシュボード ---------------------------------------------------
+idx_cols = st.columns(len(MARKET_INDICATORS))
+for col, ind in zip(idx_cols, MARKET_INDICATORS):
+    latest, diff = fetch_index_snapshot(ind["ticker"], ind["divide"])
+    with col:
+        if latest is not None:
+            st.metric(
+                ind["label"],
+                f"{latest:,.{ind['decimals']}f}{ind['unit']}",
+                delta=f"{diff:+.{ind['decimals']}f}",
+                help=ind["help"],
+            )
+        else:
+            st.metric(ind["label"], "取得できません", help=ind["help"])
+
+with st.expander("📎 物価指数（CPI）を見る"):
+    cpi_cols = st.columns(len(CPI_SERIES))
+    for col, series in zip(cpi_cols, CPI_SERIES):
+        yoy, asof = fetch_cpi_yoy(series["series_id"])
+        with col:
+            if yoy is not None:
+                st.metric(
+                    series["label"],
+                    f"{yoy:+.1f}%",
+                    help=series["help"] + f"（基準月: {asof}）",
+                )
+            else:
+                st.metric(series["label"], "取得できません", help=series["help"])
+    st.caption("データ提供: FRED（セントルイス連銀）。月次更新のため、日々の値動きとはタイミングが異なります。")
+
+st.markdown("")
+
+# ---------------------------------------------------------------------------
+# サイドバー
+# ---------------------------------------------------------------------------
 st.sidebar.markdown("## ⚙️ 設定")
 
 master = load_master(STOCKS_CSV)
@@ -248,7 +447,6 @@ else:
 sector_df = sector_df.copy()
 sector_df["label"] = sector_df["code"] + " " + sector_df["name"]
 
-# セクター切り替え時に選択銘柄を自動でリセットする（key にセクター名を含める）
 default_n = min(6, len(sector_df))
 selected_labels = st.sidebar.multiselect(
     "銘柄",
@@ -261,7 +459,7 @@ selected_codes = [lbl.split(" ")[0] for lbl in selected_labels]
 period_choice = st.sidebar.radio(
     "期間",
     list(PERIOD_PRESETS.keys()),
-    index=2,
+    index=3,
     horizontal=True,
 )
 
@@ -283,19 +481,15 @@ else:
     end_date = today
 
 with st.sidebar.expander("銘柄を追加したい場合"):
-    st.caption(
-        "`stocks.csv` に `code,name,sector` の形式で行を追加してください。"
-    )
-
-# ---------------------------------------------------------------------------
-# メイン
-# ---------------------------------------------------------------------------
-st.title("📈 日本株チャートビューア")
+    st.caption("`stocks.csv` に `code,name,sector` の形式で行を追加してください。")
 
 if not selected_codes:
     st.info("👈 左のサイドバーで、見たいセクターと銘柄を選んでください。")
     st.stop()
 
+# ---------------------------------------------------------------------------
+# データ取得（タブ共通）
+# ---------------------------------------------------------------------------
 rows = []
 with st.spinner("株価データを取得中です…"):
     for code in selected_codes:
@@ -311,13 +505,15 @@ with st.spinner("株価データを取得中です…"):
                 "base_p": round(base_p, 1) if base_p is not None else None,
                 "latest_p": round(latest_p, 1) if latest_p is not None else None,
                 "earnings": next_earnings_label(earnings_dates, today),
+                "earnings_raw": earnings_dates,
             }
         )
 
 result_df = pd.DataFrame(rows).sort_values("pct", ascending=False, na_position="last")
 
-tab1, tab2 = st.tabs(["📊 セクター比較", "🕯️ 個別チャート"])
+tab1, tab2, tab3 = st.tabs(["📊 セクター比較", "🕯️ 個別チャート", "🗓️ 決算カレンダー"])
 
+# --- タブ1: セクター比較 ---------------------------------------------------
 with tab1:
     st.caption(f"「{selected_sector}」・直近{period_choice}のトータル騰落率")
 
@@ -326,9 +522,7 @@ with tab1:
         arrow = pct_arrow(r["pct"])
         pct_text = f"{r['pct']:+.2f}%" if r["pct"] is not None else "取得できません"
         price_text = (
-            f"{r['base_p']:.1f}円 → {r['latest_p']:.1f}円"
-            if r["base_p"] is not None
-            else ""
+            f"{r['base_p']:.1f}円 → {r['latest_p']:.1f}円" if r["base_p"] is not None else ""
         )
         badge_class = "badge" if r["earnings"] else "badge badge-none"
         badge_text = r["earnings"] if r["earnings"] else "決算情報なし"
@@ -352,6 +546,7 @@ with tab1:
             unsafe_allow_html=True,
         )
 
+# --- タブ2: 個別チャート ---------------------------------------------------
 with tab2:
     focus_label = st.selectbox("銘柄を選択", options=selected_labels)
     focus_code = focus_label.split(" ")[0]
@@ -359,7 +554,7 @@ with tab2:
 
     chart_days = st.select_slider(
         "表示期間",
-        options=[30, 60, 90, 180, 365, 730],
+        options=[10, 30, 60, 90, 180, 365, 730],
         value=180,
         format_func=lambda d: f"{d}日",
     )
@@ -414,654 +609,101 @@ with tab2:
             yaxis_title="株価(円)",
             xaxis_rangeslider_visible=False,
             hovermode="x unified",
-            height=560,
+            height=680,
             margin=dict(t=50, b=10, l=10, r=10),
             plot_bgcolor="white",
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption("チャート上にマウスを合わせると、その日の始値・高値・安値・終値が表示されます。")
-
-        pct, base_p, latest_p = pct_change_over_period(hist, chart_start, today)
-        m1, m2 = st.columns(2)
-        with m1:
-            if pct is not None:
-                st.metric(
-                    label="表示期間トータル騰落率",
-                    value=f"{latest_p:.1f} 円",
-                    delta=f"{pct:+.2f}%",
-                )
-        with m2:
-            if visible_earnings:
-                st.metric(
-                    label="直近の決算発表日",
-                    value=str(visible_earnings[0]),
-                )
-            else:
-                st.metric(label="決算発表日", value="情報なし")
-# -*- coding: utf-8 -*-
-"""
-自分専用 日本株チャートビューア
-============================
-使い方:
-    streamlit run app.py
-
-必要なライブラリ (初回のみ):
-    pip install streamlit yfinance plotly pandas
-
-機能:
-  - stocks.csv に登録した銘柄をセクターごとに一覧・比較
-  - 「前日比」ではなく、任意の期間を指定してトータルの騰落率(%)を表示
-  - ローソク足チャートにカーソルを合わせると、その時点のOHLC株価を表示
-  - 決算発表日をチャート上・一覧表の両方で確認できる
-"""
-
-import datetime as dt
-
-import pandas as pd
-import plotly.graph_objects as go
-import streamlit as st
-import yfinance as yf
-
-st.set_page_config(page_title="My Stock Chart", layout="wide", page_icon="📈")
-
-STOCKS_CSV = "stocks.csv"
-
-PERIOD_PRESETS = {
-    "5日": 5,
-    "10日": 10,
-    "20日": 20,
-    "60日": 60,
-    "半年": 182,
-    "1年": 365,
-    "カスタム": None,
-}
-
-
-# ---------------------------------------------------------------------------
-# データ取得
-# ---------------------------------------------------------------------------
-@st.cache_data(ttl=600, show_spinner=False)
-def load_master(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path, dtype={"code": str})
-    return df
-
-
-@st.cache_data(ttl=600, show_spinner=False)
-def fetch_history(code: str, start: dt.date, end: dt.date) -> pd.DataFrame:
-    """日本株のコードから .T ティッカーで日足OHLCを取得"""
-    ticker = f"{code}.T"
-    # 期間の前後に少し余裕を持たせて取得(休場日対策)
-    try:
-        df = yf.download(
-            ticker,
-            start=start - dt.timedelta(days=10),
-            end=end + dt.timedelta(days=1),
-            progress=False,
-            auto_adjust=False,
-        )
-    except Exception:
-        return pd.DataFrame()
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    df = df.dropna(how="all")
-    return df
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_earnings_dates(code: str) -> list:
-    """決算発表日の一覧を取得(取得できない銘柄もあるためtry/exceptで保護)"""
-    ticker = f"{code}.T"
-    try:
-        t = yf.Ticker(ticker)
-        edf = t.get_earnings_dates(limit=12)
-        if edf is None or edf.empty:
-            return []
-        return sorted(d.date() for d in edf.index.to_pydatetime())
-    except Exception:
-        return []
-
-
-def next_earnings_label(earnings_dates: list, today: dt.date) -> str:
-    """一覧表示用: 直近の決算発表日を「予定」「発表済」付きで返す"""
-    if not earnings_dates:
-        return "—"
-    future = [d for d in earnings_dates if d >= today]
-    if future:
-        return f"{future[0]}（予定）"
-    past = [d for d in earnings_dates if d < today]
-    if past:
-        return f"{max(past)}（発表済）"
-    return "—"
-
-
-def pct_change_over_period(df: pd.DataFrame, start: dt.date, end: dt.date):
-    """指定期間の始値近辺の終値 → 直近終値のトータル騰落率(%)"""
-    if df.empty:
-        return None, None, None
-    window = df[(df.index.date >= start) & (df.index.date <= end)]
-    if window.empty:
-        window = df
-    base_price = float(window["Close"].iloc[0])
-    latest_price = float(window["Close"].iloc[-1])
-    if base_price == 0:
-        return None, None, None
-    pct = (latest_price - base_price) / base_price * 100
-    return pct, base_price, latest_price
-
-
-def color_pct(val):
-    if not isinstance(val, (int, float)) or pd.isna(val):
-        return ""
-    if val > 0:
-        return "color: #d62728; font-weight: 600"
-    if val < 0:
-        return "color: #1f77b4; font-weight: 600"
-    return ""
-
-
-def style_pct_column(df: pd.DataFrame, column: str):
-    """pandasのバージョン差異(applymap→map改名)を吸収して色付けする"""
-    styler = df.style.format({column: "{:+.2f}%"}, na_rep="—")
-    try:
-        return styler.map(color_pct, subset=[column])
-    except AttributeError:
-        return styler.applymap(color_pct, subset=[column])
-
-
-# ---------------------------------------------------------------------------
-# サイドバー
-# ---------------------------------------------------------------------------
-st.sidebar.title("⚙️ 設定")
-
-master = load_master(STOCKS_CSV)
-sectors = ["すべて"] + sorted(master["sector"].unique().tolist())
-selected_sector = st.sidebar.selectbox("① セクターを選ぶ", sectors)
-
-if selected_sector == "すべて":
-    sector_df = master
-else:
-    sector_df = master[master["sector"] == selected_sector]
-
-sector_df = sector_df.copy()
-sector_df["label"] = sector_df["code"] + " " + sector_df["name"]
-
-default_n = min(8, len(sector_df))
-selected_labels = st.sidebar.multiselect(
-    "② 比較したい銘柄を選ぶ",
-    options=sector_df["label"].tolist(),
-    default=sector_df["label"].tolist()[:default_n],
-)
-selected_codes = [lbl.split(" ")[0] for lbl in selected_labels]
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("③ 騰落率を計算する期間")
-period_choice = st.sidebar.radio(
-    "前日比ではなく、この期間トータルでの騰落率を表示します",
-    list(PERIOD_PRESETS.keys()),
-    index=2,
-)
-
-today = dt.date.today()
-if period_choice == "カスタム":
-    date_range = st.sidebar.date_input(
-        "開始日〜終了日を指定",
-        value=(today - dt.timedelta(days=30), today),
-    )
-    if isinstance(date_range, tuple) and len(date_range) == 2:
-        start_date, end_date = date_range
-    else:
-        start_date, end_date = today - dt.timedelta(days=30), today
-else:
-    days = PERIOD_PRESETS[period_choice]
-    start_date = today - dt.timedelta(days=days)
-    end_date = today
-
-st.sidebar.caption(f"📅 集計期間: {start_date} 〜 {end_date}")
-st.sidebar.markdown("---")
-st.sidebar.caption(
-    "銘柄を追加したい場合は `stocks.csv` に "
-    "`code,name,sector` の形式で行を追加してください。"
-)
-
-st.title("📈 自分専用 日本株チャートビューア")
-st.caption("前日比だけでなく、好きな期間のトータル騰落率・決算発表日をまとめて確認できます。")
-
-if not selected_codes:
-    st.info("👈 左のサイドバーで、見たいセクターと銘柄を選んでください。")
-    st.stop()
-
-# ---------------------------------------------------------------------------
-# データ取得（タブ共通）
-# ---------------------------------------------------------------------------
-rows = []
-with st.spinner("株価データを取得中です…"):
-    for code in selected_codes:
-        name = master.loc[master["code"] == code, "name"].values[0]
-        hist = fetch_history(code, start_date, end_date)
-        pct, base_p, latest_p = pct_change_over_period(hist, start_date, end_date)
-        earnings_dates = fetch_earnings_dates(code)
-        rows.append(
-            {
-                "コード": code,
-                "銘柄名": name,
-                "騰落率(%)": round(pct, 2) if pct is not None else None,
-                "起点株価": round(base_p, 1) if base_p is not None else None,
-                "直近株価": round(latest_p, 1) if latest_p is not None else None,
-                "決算発表日": next_earnings_label(earnings_dates, today),
-            }
+            dragmode="zoom",
         )
 
-result_df = pd.DataFrame(rows).sort_values("騰落率(%)", ascending=False, na_position="last")
-
-# ---------------------------------------------------------------------------
-# タブでUIを整理
-# ---------------------------------------------------------------------------
-tab1, tab2 = st.tabs(["📊 セクター内の騰落率比較", "🕯️ 個別銘柄のローソク足チャート"])
-
-with tab1:
-    st.subheader(f"「{selected_sector}」セクターの騰落率比較（直近{period_choice}）")
-    st.caption("株価は日本語の東証コード＋「.T」でYahoo!ファイナンスから取得しています。")
-
-    col1, col2 = st.columns([1.1, 1])
-    with col1:
-        st.dataframe(
-            style_pct_column(result_df, "騰落率(%)"),
-            use_container_width=True,
-            hide_index=True,
-        )
-    with col2:
-        bar = go.Figure(
-            go.Bar(
-                x=result_df["騰落率(%)"],
-                y=result_df["銘柄名"],
-                orientation="h",
-                marker_color=[
-                    "#d62728" if v is not None and v > 0 else "#1f77b4"
-                    for v in result_df["騰落率(%)"]
-                ],
+        # クリックした地点の株価をピン留め表示（対応バージョンのStreamlitのみ）
+        event = None
+        try:
+            event = st.plotly_chart(
+                fig,
+                use_container_width=True,
+                on_select="rerun",
+                selection_mode=("points",),
+                key=f"candle_{focus_code}_{chart_days}",
             )
-        )
-        bar.update_layout(
-            height=max(320, 32 * len(result_df)),
-            margin=dict(l=10, r=10, t=10, b=10),
-            xaxis_title="騰落率(%)",
-            yaxis=dict(autorange="reversed"),
-        )
-        st.plotly_chart(bar, use_container_width=True)
+        except TypeError:
+            # 古いバージョンのStreamlitでは on_select 未対応 → 通常表示にフォールバック
+            st.plotly_chart(fig, use_container_width=True)
 
-    st.caption("「決算発表日」列: 未来の日付は（予定）、過去の日付は（発表済）を表します。データが無い銘柄は「—」と表示されます。")
+        clicked_row = None
+        clicked_date = None
+        if event is not None:
+            try:
+                sel = getattr(event, "selection", None)
+                if sel is None and isinstance(event, dict):
+                    sel = event.get("selection")
+                points = None
+                if sel is not None:
+                    points = sel.get("points") if isinstance(sel, dict) else getattr(sel, "points", None)
+                if points:
+                    p0 = points[0]
+                    idx = p0.get("point_index") if isinstance(p0, dict) else getattr(p0, "point_index", None)
+                    if idx is not None and 0 <= idx < len(hist):
+                        clicked_row = hist.iloc[idx]
+                        clicked_date = hist.index[idx].date()
+            except Exception:
+                clicked_row = None
 
-with tab2:
-    st.subheader("個別銘柄のチャートを見る")
-
-    focus_label = st.selectbox("銘柄を選択", options=selected_labels)
-    focus_code = focus_label.split(" ")[0]
-    focus_name = master.loc[master["code"] == focus_code, "name"].values[0]
-
-    chart_days = st.slider("表示するチャートの期間（日数）", 30, 730, 180, step=10)
-    chart_start = today - dt.timedelta(days=chart_days)
-    hist = fetch_history(focus_code, chart_start, today)
-
-    if hist.empty:
-        st.warning("株価データを取得できませんでした。銘柄コードや通信環境をご確認ください。")
-    else:
-        fig = go.Figure(
-            data=[
-                go.Candlestick(
-                    x=hist.index,
-                    open=hist["Open"],
-                    high=hist["High"],
-                    low=hist["Low"],
-                    close=hist["Close"],
-                    increasing_line_color="#d62728",
-                    decreasing_line_color="#1f77b4",
-                    name=focus_name,
-                    hovertemplate=(
-                        "%{x|%Y-%m-%d}<br>"
-                        "始値: %{open:.1f}円<br>"
-                        "高値: %{high:.1f}円<br>"
-                        "安値: %{low:.1f}円<br>"
-                        "終値: %{close:.1f}円<extra></extra>"
-                    ),
-                )
-            ]
-        )
-
-        earnings_dates = fetch_earnings_dates(focus_code)
-        visible_earnings = [
-            d for d in earnings_dates if chart_start <= d <= today + dt.timedelta(days=365)
-        ]
-        for d in visible_earnings:
-            fig.add_vline(x=pd.Timestamp(d), line_width=1, line_dash="dash", line_color="orange")
-        if visible_earnings:
-            fig.add_annotation(
-                x=pd.Timestamp(visible_earnings[0]),
-                y=1,
-                yref="paper",
-                text="決算発表",
-                showarrow=False,
-                font=dict(color="orange", size=11),
-                yshift=10,
-            )
-
-        fig.update_layout(
-            title=f"{focus_code} {focus_name}　― マウスを合わせるとその日の株価が表示されます",
-            xaxis_title="日付",
-            yaxis_title="株価(円)",
-            xaxis_rangeslider_visible=False,
-            hovermode="x unified",
-            height=600,
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-        pct, base_p, latest_p = pct_change_over_period(hist, chart_start, today)
-        m1, m2 = st.columns(2)
-        with m1:
-            if pct is not None:
-                st.metric(
-                    label=f"{focus_name}　表示期間トータル騰落率",
-                    value=f"{latest_p:.1f} 円",
-                    delta=f"{pct:+.2f}%（期間開始時点: {base_p:.1f}円）",
-                )
-        with m2:
-            if visible_earnings:
-                st.markdown("**決算発表日（直近〜今後1年）**")
-                st.write("、".join(str(d) for d in visible_earnings[:6]))
-            else:
-                st.markdown("**決算発表日**")
-                st.caption("この銘柄の決算発表日情報は取得できませんでした。")
-# -*- coding: utf-8 -*-
-"""
-自分専用 日本株チャートビューア
-============================
-使い方:
-    streamlit run app.py
-
-必要なライブラリ (初回のみ):
-    pip install streamlit yfinance plotly pandas
-
-機能:
-  - stocks.csv に登録した銘柄をセクターごとに一覧・比較
-  - 「前日比」ではなく、任意の期間を指定してトータルの騰落率(%)を表示
-  - ローソク足チャートにカーソルを合わせる/クリックすると、その時点のOHLC株価を表示
-  - 決算発表日をチャート上に縦線でマーキング
-"""
-
-import datetime as dt
-
-import pandas as pd
-import plotly.graph_objects as go
-import streamlit as st
-import yfinance as yf
-
-st.set_page_config(page_title="My Stock Chart", layout="wide")
-
-STOCKS_CSV = "stocks.csv"
-
-PERIOD_PRESETS = {
-    "5日": 5,
-    "10日": 10,
-    "20日": 20,
-    "60日": 60,
-    "半年": 182,
-    "1年": 365,
-    "カスタム": None,
-}
-
-
-# ---------------------------------------------------------------------------
-# データ取得
-# ---------------------------------------------------------------------------
-@st.cache_data(ttl=600, show_spinner=False)
-def load_master(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path, dtype={"code": str})
-    return df
-
-
-@st.cache_data(ttl=600, show_spinner=False)
-def fetch_history(code: str, start: dt.date, end: dt.date) -> pd.DataFrame:
-    """日本株のコードから .T ティッカーで日足OHLCを取得"""
-    ticker = f"{code}.T"
-    # 期間の前後に少し余裕を持たせて取得(休場日対策)
-    df = yf.download(
-        ticker,
-        start=start - dt.timedelta(days=10),
-        end=end + dt.timedelta(days=1),
-        progress=False,
-        auto_adjust=False,
-    )
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    df = df.dropna(how="all")
-    return df
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_earnings_dates(code: str) -> list:
-    """決算発表日の一覧を取得(取得できない銘柄もあるためtry/exceptで保護)"""
-    ticker = f"{code}.T"
-    try:
-        t = yf.Ticker(ticker)
-        edf = t.get_earnings_dates(limit=12)
-        if edf is None or edf.empty:
-            return []
-        return [d.date() for d in edf.index.to_pydatetime()]
-    except Exception:
-        return []
-
-
-def pct_change_over_period(df: pd.DataFrame, start: dt.date, end: dt.date):
-    """指定期間の始値近辺の終値 → 直近終値のトータル騰落率(%)"""
-    if df.empty:
-        return None, None, None
-    window = df[(df.index.date >= start) & (df.index.date <= end)]
-    if window.empty:
-        window = df
-    base_price = float(window["Close"].iloc[0])
-    latest_price = float(window["Close"].iloc[-1])
-    if base_price == 0:
-        return None, None, None
-    pct = (latest_price - base_price) / base_price * 100
-    return pct, base_price, latest_price
-
-
-# ---------------------------------------------------------------------------
-# サイドバー
-# ---------------------------------------------------------------------------
-st.sidebar.title("設定")
-
-master = load_master(STOCKS_CSV)
-sectors = ["すべて"] + sorted(master["sector"].unique().tolist())
-selected_sector = st.sidebar.selectbox("セクター", sectors)
-
-if selected_sector == "すべて":
-    sector_df = master
-else:
-    sector_df = master[master["sector"] == selected_sector]
-
-sector_df = sector_df.copy()
-sector_df["label"] = sector_df["code"] + " " + sector_df["name"]
-
-default_codes = sector_df["code"].tolist()
-selected_labels = st.sidebar.multiselect(
-    "表示銘柄(セクター内)",
-    options=sector_df["label"].tolist(),
-    default=sector_df["label"].tolist()[: min(8, len(sector_df))],
-)
-selected_codes = [lbl.split(" ")[0] for lbl in selected_labels]
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("騰落率の期間")
-period_choice = st.sidebar.radio("期間プリセット", list(PERIOD_PRESETS.keys()), index=2)
-
-today = dt.date.today()
-if period_choice == "カスタム":
-    date_range = st.sidebar.date_input(
-        "開始日〜終了日",
-        value=(today - dt.timedelta(days=30), today),
-    )
-    if isinstance(date_range, tuple) and len(date_range) == 2:
-        start_date, end_date = date_range
-    else:
-        start_date, end_date = today - dt.timedelta(days=30), today
-else:
-    days = PERIOD_PRESETS[period_choice]
-    start_date = today - dt.timedelta(days=days)
-    end_date = today
-
-st.sidebar.caption(f"期間: {start_date} 〜 {end_date}")
-st.sidebar.markdown("---")
-st.sidebar.caption(
-    "銘柄を追加したい場合は stocks.csv に "
-    "`code,name,sector` の形式で行を追加してください。"
-)
-
-st.title("📈 自分専用 日本株チャートビューア")
-
-# ---------------------------------------------------------------------------
-# セクター内 騰落率比較
-# ---------------------------------------------------------------------------
-st.header(f"セクター別 騰落率比較（{selected_sector}／{period_choice}）")
-
-if not selected_codes:
-    st.info("左のサイドバーで表示したい銘柄を選択してください。")
-else:
-    rows = []
-    with st.spinner("株価データを取得中..."):
-        for code in selected_codes:
-            name = master.loc[master["code"] == code, "name"].values[0]
-            hist = fetch_history(code, start_date, end_date)
-            pct, base_p, latest_p = pct_change_over_period(hist, start_date, end_date)
-            rows.append(
-                {
-                    "コード": code,
-                    "銘柄名": name,
-                    "騰落率(%)": round(pct, 2) if pct is not None else None,
-                    "起点株価": round(base_p, 1) if base_p is not None else None,
-                    "直近株価": round(latest_p, 1) if latest_p is not None else None,
-                }
-            )
-
-    result_df = pd.DataFrame(rows).sort_values("騰落率(%)", ascending=False)
-
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        st.dataframe(
-            result_df.style.format({"騰落率(%)": "{:+.2f}%"}, na_rep="—").applymap(
-                lambda v: "color: red" if isinstance(v, (int, float)) and v > 0
-                else ("color: blue" if isinstance(v, (int, float)) and v < 0 else ""),
-                subset=["騰落率(%)"],
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-    with col2:
-        bar = go.Figure(
-            go.Bar(
-                x=result_df["騰落率(%)"],
-                y=result_df["銘柄名"],
-                orientation="h",
-                marker_color=[
-                    "crimson" if v and v > 0 else "royalblue"
-                    for v in result_df["騰落率(%)"]
-                ],
-            )
-        )
-        bar.update_layout(
-            height=max(300, 30 * len(result_df)),
-            margin=dict(l=10, r=10, t=10, b=10),
-            xaxis_title="騰落率(%)",
-        )
-        st.plotly_chart(bar, use_container_width=True)
-
-    st.markdown("---")
-
-    # -----------------------------------------------------------------
-    # 個別銘柄のローソク足チャート
-    # -----------------------------------------------------------------
-    st.header("個別銘柄チャート")
-
-    focus_label = st.selectbox(
-        "詳細を見る銘柄",
-        options=selected_labels,
-    )
-    focus_code = focus_label.split(" ")[0]
-    focus_name = master.loc[master["code"] == focus_code, "name"].values[0]
-
-    chart_days = st.slider("チャート表示期間(日数)", 30, 730, 180, step=10)
-    chart_start = today - dt.timedelta(days=chart_days)
-    hist = fetch_history(focus_code, chart_start, today)
-
-    if hist.empty:
-        st.warning("株価データを取得できませんでした。ティッカーコードや通信環境をご確認ください。")
-    else:
-        fig = go.Figure(
-            data=[
-                go.Candlestick(
-                    x=hist.index,
-                    open=hist["Open"],
-                    high=hist["High"],
-                    low=hist["Low"],
-                    close=hist["Close"],
-                    increasing_line_color="crimson",
-                    decreasing_line_color="royalblue",
-                    name=focus_name,
-                    hovertemplate=(
-                        "%{x|%Y-%m-%d}<br>"
-                        "始値: %{open:.1f}<br>"
-                        "高値: %{high:.1f}<br>"
-                        "安値: %{low:.1f}<br>"
-                        "終値: %{close:.1f}<extra></extra>"
-                    ),
-                )
-            ]
-        )
-
-        # 決算発表日を縦線でマーキング
-        earnings_dates = fetch_earnings_dates(focus_code)
-        visible_earnings = [
-            d for d in earnings_dates if chart_start <= d <= today + dt.timedelta(days=365)
-        ]
-        for d in visible_earnings:
-            fig.add_vline(
-                x=pd.Timestamp(d),
-                line_width=1,
-                line_dash="dash",
-                line_color="orange",
-            )
-        if visible_earnings:
-            fig.add_annotation(
-                x=pd.Timestamp(visible_earnings[0]),
-                y=1,
-                yref="paper",
-                text="決算",
-                showarrow=False,
-                font=dict(color="orange", size=11),
-                yshift=10,
-            )
-
-        fig.update_layout(
-            title=f"{focus_code} {focus_name}",
-            xaxis_title="日付",
-            yaxis_title="株価(円)",
-            xaxis_rangeslider_visible=False,
-            hovermode="x unified",
-            height=600,
-        )
-        st.plotly_chart(fig, use_container_width=True, theme=None)
-
-        pct, base_p, latest_p = pct_change_over_period(hist, chart_start, today)
-        if pct is not None:
-            st.metric(
-                label=f"{focus_name} 表示期間トータル騰落率",
-                value=f"{latest_p:.1f} 円",
-                delta=f"{pct:+.2f}% (期間開始: {base_p:.1f}円)",
-            )
-
-        if visible_earnings:
-            st.caption(
-                "次回/直近の決算発表日: "
-                + "、".join(str(d) for d in visible_earnings[:4])
+        if clicked_row is not None:
+            st.markdown(
+                f"""
+                <div class="pin-price">
+                    📍 <b>{clicked_date}</b> の株価
+                    始値 {clicked_row['Open']:.1f}円 ／
+                    高値 {clicked_row['High']:.1f}円 ／
+                    安値 {clicked_row['Low']:.1f}円 ／
+                    終値 <b>{clicked_row['Close']:.1f}円</b>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
         else:
-            st.caption("この銘柄の決算発表日情報は取得できませんでした。")
+            st.caption("チャート上の見たい地点をクリックすると、その日の株価がピン留め表示されます。マウスを合わせるだけでも数値が出ます。")
+
+        pct, base_p, latest_p = pct_change_over_period(hist, chart_start, today)
+        m1, m2 = st.columns(2)
+        with m1:
+            if pct is not None:
+                st.metric(label="表示期間トータル騰落率", value=f"{latest_p:.1f} 円", delta=f"{pct:+.2f}%")
+        with m2:
+            if visible_earnings:
+                st.metric(label="直近の決算発表日", value=str(visible_earnings[0]))
+            else:
+                st.metric(label="決算発表日", value="情報なし")
+
+# --- タブ3: 決算カレンダー -------------------------------------------------
+with tab3:
+    st.caption("選択中の銘柄の決算発表日を一覧で確認できます。")
+    cal_rows = []
+    for _, r in result_df.iterrows():
+        for d in r["earnings_raw"]:
+            cal_rows.append(
+                {
+                    "日付": d,
+                    "状態": "予定" if d >= today else "発表済",
+                    "コード": r["code"],
+                    "銘柄名": r["name"],
+                }
+            )
+    if not cal_rows:
+        st.info("選択中の銘柄について、決算発表日のデータが取得できませんでした。")
+    else:
+        cal_df = pd.DataFrame(cal_rows).sort_values("日付")
+        upcoming = cal_df[cal_df["状態"] == "予定"]
+        past = cal_df[cal_df["状態"] == "発表済"].sort_values("日付", ascending=False)
+
+        st.subheader("📌 今後の決算発表予定")
+        if upcoming.empty:
+            st.caption("今後の決算発表予定は取得できませんでした。")
+        else:
+            st.dataframe(upcoming, use_container_width=True, hide_index=True)
+
+        st.subheader("📖 発表済みの決算")
+        if past.empty:
+            st.caption("発表済みの決算データはありません。")
+        else:
+            st.dataframe(past, use_container_width=True, hide_index=True)
