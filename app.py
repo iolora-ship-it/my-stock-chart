@@ -9,14 +9,18 @@
     pip install -r requirements.txt
 
 機能:
-  - トップに日経平均・SOX指数・ドル円・米国10年金利、CPI(日米)を表示（用語説明つき）
+  - トップに日経平均・SOX指数・ドル円・米国10年金利、CPI(日米)を表示（用語説明つき、選択期間に連動）
   - stocks.csv に登録した銘柄をセクターごとに一覧・比較
+  - 証券コードを直接入力して、どんな銘柄でもその場で検索・追加できる
+  - お気に入りグループを作成して、好きな銘柄をまとめて管理できる
   - 1日〜1年まで細かく期間を指定してトータルの騰落率(%)を表示
   - 大きなローソク足チャート。クリックした地点の株価をピン留め表示
   - 決算発表日をカード・カレンダー表の両方で確認できる
 """
 
 import datetime as dt
+import json
+import os
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -26,6 +30,7 @@ import yfinance as yf
 st.set_page_config(page_title="My Stock Chart", layout="wide", page_icon="📈")
 
 STOCKS_CSV = "stocks.csv"
+GROUPS_FILE = "groups.json"
 
 PERIOD_PRESETS = {
     "1日": 1,
@@ -49,7 +54,6 @@ MARKET_INDICATORS = [
         "label": "日経平均株価",
         "unit": "円",
         "decimals": 0,
-        "divide": 1,
         "help": "東証プライム市場の代表225銘柄の平均株価。日本株市場全体の値動きを示す最も基本的な指標です。",
     },
     {
@@ -57,7 +61,6 @@ MARKET_INDICATORS = [
         "label": "SOX指数",
         "unit": "pt",
         "decimals": 1,
-        "divide": 1,
         "help": "フィラデルフィア半導体指数。米国の主要な半導体関連企業で構成され、半導体セクター全体の勢いを示します。前日の米国市場の値が表示されます。",
     },
     {
@@ -65,7 +68,6 @@ MARKET_INDICATORS = [
         "label": "ドル円",
         "unit": "円",
         "decimals": 2,
-        "divide": 1,
         "help": "1米ドル＝何円かを示す為替レート。円安（数値が大きくなる）は輸出企業に有利、円高は輸入企業に有利とされます。",
     },
     {
@@ -73,7 +75,6 @@ MARKET_INDICATORS = [
         "label": "米国10年金利",
         "unit": "%",
         "decimals": 2,
-        "divide": 10,
         "help": "米国財務省が発行する10年物国債の利回り。世界の金利・株式市場に影響する重要指標です。上昇は株価にマイナスに働きやすいとされます。",
     },
 ]
@@ -166,7 +167,12 @@ def inject_style():
             box-shadow: 0 10px 20px rgba(20, 20, 30, 0.10);
         }
         div[data-testid="stMetricValue"] {
-            font-weight: 900;
+            font-weight: 800 !important;
+            font-size: 1.55rem !important;
+            white-space: normal !important;
+            overflow: visible !important;
+            text-overflow: unset !important;
+            line-height: 1.25 !important;
         }
 
         /* タブ */
@@ -273,25 +279,31 @@ def fetch_history(ticker_code: str, start: dt.date, end: dt.date, is_index: bool
         return pd.DataFrame()
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    df = df.dropna(how="all")
+    if "Close" in df.columns:
+        df = df.dropna(subset=["Close"])
+    else:
+        df = df.dropna(how="all")
     return df
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_index_snapshot(ticker: str, divide: float = 1):
-    """直近の値と前日比を取得"""
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_company_name(code: str):
+    """証券コードから会社名を取得（見つからない/データが無い場合は None）"""
+    ticker = f"{code}.T"
     try:
-        df = yf.download(ticker, period="10d", interval="1d", progress=False, auto_adjust=False)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        df = df.dropna(how="all")
-        if len(df) < 2:
-            return None, None
-        latest = float(df["Close"].iloc[-1]) / divide
-        prev = float(df["Close"].iloc[-2]) / divide
-        return latest, latest - prev
+        t = yf.Ticker(ticker)
+        hist = t.history(period="5d")
+        if hist is None or hist.empty:
+            return None
+        info = {}
+        try:
+            info = t.info or {}
+        except Exception:
+            info = {}
+        name = info.get("longName") or info.get("shortName") or code
+        return name
     except Exception:
-        return None, None
+        return None
 
 
 @st.cache_data(ttl=21600, show_spinner=False)
@@ -384,6 +396,27 @@ def pct_arrow(v):
 
 
 # ---------------------------------------------------------------------------
+# お気に入りグループの読み書き
+# ---------------------------------------------------------------------------
+def load_groups() -> dict:
+    if os.path.exists(GROUPS_FILE):
+        try:
+            with open(GROUPS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_groups(groups: dict):
+    try:
+        with open(GROUPS_FILE, "w", encoding="utf-8") as f:
+            json.dump(groups, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # 画面構築
 # ---------------------------------------------------------------------------
 inject_style()
@@ -398,63 +431,66 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# --- 市場ダッシュボード ---------------------------------------------------
-idx_cols = st.columns(len(MARKET_INDICATORS))
-for col, ind in zip(idx_cols, MARKET_INDICATORS):
-    latest, diff = fetch_index_snapshot(ind["ticker"], ind["divide"])
-    with col:
-        if latest is not None:
-            st.metric(
-                ind["label"],
-                f"{latest:,.{ind['decimals']}f}{ind['unit']}",
-                delta=f"{diff:+.{ind['decimals']}f}",
-                help=ind["help"],
-            )
-        else:
-            st.metric(ind["label"], "取得できません", help=ind["help"])
-
-with st.expander("📎 物価指数（CPI）を見る"):
-    cpi_cols = st.columns(len(CPI_SERIES))
-    for col, series in zip(cpi_cols, CPI_SERIES):
-        yoy, asof = fetch_cpi_yoy(series["series_id"])
-        with col:
-            if yoy is not None:
-                st.metric(
-                    series["label"],
-                    f"{yoy:+.1f}%",
-                    help=series["help"] + f"（基準月: {asof}）",
-                )
-            else:
-                st.metric(series["label"], "取得できません", help=series["help"])
-    st.caption("データ提供: FRED（セントルイス連銀）。月次更新のため、日々の値動きとはタイミングが異なります。")
-
-st.markdown("")
-
 # ---------------------------------------------------------------------------
-# サイドバー
+# サイドバー（期間もここで確定させる。市場ダッシュボードがこの値を使うため先に処理する）
 # ---------------------------------------------------------------------------
+if "extra_stocks" not in st.session_state:
+    st.session_state["extra_stocks"] = {}
+
 st.sidebar.markdown("## ⚙️ 設定")
 
-master = load_master(STOCKS_CSV)
-sectors = ["すべて"] + sorted(master["sector"].unique().tolist())
-selected_sector = st.sidebar.selectbox("セクター", sectors)
-
-if selected_sector == "すべて":
-    sector_df = master
+master_base = load_master(STOCKS_CSV)
+if st.session_state["extra_stocks"]:
+    extra_df = pd.DataFrame(
+        [
+            {"code": c, "name": n, "sector": "🔍 検索で追加した銘柄"}
+            for c, n in st.session_state["extra_stocks"].items()
+        ]
+    )
+    master = pd.concat([master_base, extra_df], ignore_index=True)
 else:
-    sector_df = master[master["sector"] == selected_sector]
+    master = master_base
 
-sector_df = sector_df.copy()
-sector_df["label"] = sector_df["code"] + " " + sector_df["name"]
+view_mode = st.sidebar.radio("銘柄の選び方", ["セクターから選ぶ", "⭐ グループから選ぶ"])
 
-default_n = min(6, len(sector_df))
-selected_labels = st.sidebar.multiselect(
-    "銘柄",
-    options=sector_df["label"].tolist(),
-    default=sector_df["label"].tolist()[:default_n],
-    key=f"stock_select_{selected_sector}",
-)
-selected_codes = [lbl.split(" ")[0] for lbl in selected_labels]
+groups = load_groups()
+
+if view_mode == "セクターから選ぶ":
+    sectors = ["すべて"] + sorted(master["sector"].unique().tolist())
+    selected_sector = st.sidebar.selectbox("セクター", sectors)
+
+    if selected_sector == "すべて":
+        sector_df = master
+    else:
+        sector_df = master[master["sector"] == selected_sector]
+
+    sector_df = sector_df.copy()
+    sector_df["label"] = sector_df["code"] + " " + sector_df["name"]
+
+    default_n = min(6, len(sector_df))
+    selected_labels = st.sidebar.multiselect(
+        "銘柄",
+        options=sector_df["label"].tolist(),
+        default=sector_df["label"].tolist()[:default_n],
+        key=f"stock_select_{selected_sector}",
+    )
+    selected_codes = [lbl.split(" ")[0] for lbl in selected_labels]
+else:
+    selected_sector = "グループ"
+    if not groups:
+        st.sidebar.info("まだグループがありません。下の「⭐ グループを管理」から作成してください。")
+        selected_codes, selected_labels = [], []
+    else:
+        group_name = st.sidebar.selectbox("グループ", list(groups.keys()))
+        group_codes = groups.get(group_name, [])
+        valid_codes = [c for c in group_codes if c in master["code"].values]
+        selected_labels = [
+            f"{c} {master.loc[master['code'] == c, 'name'].values[0]}" for c in valid_codes
+        ]
+        selected_codes = valid_codes
+        missing = len(group_codes) - len(valid_codes)
+        if missing > 0:
+            st.sidebar.caption(f"⚠️ {missing}件、現在のリストで見つからない銘柄があります。")
 
 period_choice = st.sidebar.radio(
     "期間",
@@ -480,11 +516,107 @@ else:
     start_date = today - dt.timedelta(days=days)
     end_date = today
 
-with st.sidebar.expander("銘柄を追加したい場合"):
-    st.caption("`stocks.csv` に `code,name,sector` の形式で行を追加してください。")
+st.sidebar.markdown("---")
+with st.sidebar.expander("🔍 銘柄コードで直接追加"):
+    st.caption("stocks.csv に無い銘柄も、証券コードが分かればその場で追加できます（このセッション中のみ有効）。")
+    search_code = st.text_input("証券コード（例: 7203, 285A）", key="search_code_input")
+    if st.button("検索して追加", key="search_code_btn"):
+        code_clean = search_code.strip().upper()
+        if not code_clean:
+            st.warning("証券コードを入力してください。")
+        else:
+            name = fetch_company_name(code_clean)
+            if name:
+                st.session_state["extra_stocks"][code_clean] = name
+                st.success(f"「{name}」({code_clean}) を追加しました。セクターで「🔍 検索で追加した銘柄」を選ぶと見られます。")
+                st.rerun()
+            else:
+                st.error("データが見つかりませんでした。コードをご確認ください。")
+
+with st.sidebar.expander("⭐ グループを管理"):
+    new_group_name = st.text_input("新しいグループ名", key="new_group_name")
+    if st.button("グループを作成", key="create_group_btn"):
+        if new_group_name.strip():
+            groups.setdefault(new_group_name.strip(), [])
+            save_groups(groups)
+            st.success(f"グループ「{new_group_name.strip()}」を作成しました。")
+            st.rerun()
+
+    if groups:
+        target_group = st.selectbox("追加先グループ", list(groups.keys()), key="add_target_group")
+        all_labels = (master["code"] + " " + master["name"]).tolist()
+        add_labels = st.multiselect("グループに追加する銘柄", options=all_labels, key="add_labels_ms")
+        if st.button("追加する", key="add_to_group_btn") and add_labels:
+            codes_to_add = [lbl.split(" ")[0] for lbl in add_labels]
+            groups[target_group] = sorted(set(groups[target_group] + codes_to_add))
+            save_groups(groups)
+            st.success("グループに追加しました。")
+            st.rerun()
+
+        remove_target = st.selectbox("グループから削除する銘柄", ["選択なし"] + groups.get(target_group, []), key="remove_from_group")
+        if remove_target != "選択なし" and st.button("この銘柄を削除", key="remove_stock_btn"):
+            groups[target_group] = [c for c in groups[target_group] if c != remove_target]
+            save_groups(groups)
+            st.success("削除しました。")
+            st.rerun()
+
+        st.markdown("---")
+        delete_group = st.selectbox("グループ自体を削除", ["選択なし"] + list(groups.keys()), key="delete_group_select")
+        if delete_group != "選択なし" and st.button("このグループを削除する", key="delete_group_btn"):
+            del groups[delete_group]
+            save_groups(groups)
+            st.success("グループを削除しました。")
+            st.rerun()
+    st.caption("⚠️ グループ情報はアプリのサーバーに保存されます。今後アプリの機能追加・修正で更新すると、リセットされる場合があります。")
+
+with st.sidebar.expander("銘柄をずっとリストに残したい場合"):
+    st.caption(
+        "上の「🔍 銘柄コードで直接追加」が一番かんたんです。ただしページを閉じると消えます。"
+        "ずっと残したい場合は「⭐ グループを管理」でお気に入りグループに入れてください。"
+    )
+    st.caption(
+        "（上級者向け）stocks.csv というファイルに `code,name,sector` の形式で行を追加すると、"
+        "全員から見えるセクター一覧に恒久的に追加できます。"
+    )
+
+# ---------------------------------------------------------------------------
+# 市場ダッシュボード（選択中の期間に連動）
+# ---------------------------------------------------------------------------
+idx_cols = st.columns(len(MARKET_INDICATORS))
+for col, ind in zip(idx_cols, MARKET_INDICATORS):
+    idx_hist = fetch_history(ind["ticker"], start_date, end_date, is_index=True)
+    pct, base_p, latest_p = pct_change_over_period(idx_hist, start_date, end_date)
+    with col:
+        if latest_p is not None:
+            st.metric(
+                ind["label"],
+                f"{latest_p:,.{ind['decimals']}f}{ind['unit']}",
+                delta=f"{pct:+.2f}%" if pct is not None else None,
+                help=ind["help"],
+            )
+        else:
+            st.metric(ind["label"], "取得できません", help=ind["help"])
+st.caption(f"📅 上の指標は選択中の期間「{period_choice}」でのトータル変化率です。")
+
+with st.expander("📎 物価指数（CPI）を見る"):
+    cpi_cols = st.columns(len(CPI_SERIES))
+    for col, series in zip(cpi_cols, CPI_SERIES):
+        yoy, asof = fetch_cpi_yoy(series["series_id"])
+        with col:
+            if yoy is not None:
+                st.metric(
+                    series["label"],
+                    f"{yoy:+.1f}%",
+                    help=series["help"] + f"（基準月: {asof}）",
+                )
+            else:
+                st.metric(series["label"], "取得できません", help=series["help"])
+    st.caption("データ提供: FRED（セントルイス連銀）。月次更新のため、日々の値動きとはタイミングが異なります。")
+
+st.markdown("")
 
 if not selected_codes:
-    st.info("👈 左のサイドバーで、見たいセクターと銘柄を選んでください。")
+    st.info("👈 左のサイドバーで、見たいセクター（またはグループ）と銘柄を選んでください。")
     st.stop()
 
 # ---------------------------------------------------------------------------
@@ -559,7 +691,13 @@ with tab2:
         format_func=lambda d: f"{d}日",
     )
     chart_start = today - dt.timedelta(days=chart_days)
-    hist = fetch_history(focus_code, chart_start, today)
+    hist_full = fetch_history(focus_code, chart_start, today)
+    if not hist_full.empty:
+        hist = hist_full[(hist_full.index.date >= chart_start) & (hist_full.index.date <= today)]
+        if hist.empty:
+            hist = hist_full
+    else:
+        hist = hist_full
 
     if hist.empty:
         st.warning("株価データを取得できませんでした。銘柄コードや通信環境をご確認ください。")
@@ -613,6 +751,11 @@ with tab2:
             margin=dict(t=50, b=10, l=10, r=10),
             plot_bgcolor="white",
             dragmode="zoom",
+        )
+        # 土日は取引がなく空白になるため、詰めて表示する（短い期間ほど間延びして見づらくなるのを防ぐ）
+        fig.update_xaxes(
+            rangebreaks=[dict(bounds=["sat", "mon"])],
+            rangeslider_visible=False,
         )
 
         # クリックした地点の株価をピン留め表示（対応バージョンのStreamlitのみ）
