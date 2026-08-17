@@ -21,9 +21,11 @@
 import datetime as dt
 import json
 import os
+import re
 
 import pandas as pd
 import plotly.graph_objects as go
+import requests
 import streamlit as st
 import yfinance as yf
 
@@ -325,6 +327,33 @@ def fetch_company_name(code: str):
         return None
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def search_ticker_by_name(query: str) -> list:
+    """Yahoo!ファイナンス(日本版)の銘柄検索ページを使い、会社名(日本語)などから候補を探す"""
+    try:
+        url = "https://finance.yahoo.co.jp/search/"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        resp = requests.get(url, params={"query": query}, headers=headers, timeout=8)
+        resp.raise_for_status()
+        html = resp.text
+        pattern = re.compile(
+            r'href="https://finance\.yahoo\.co\.jp/quote/([0-9A-Za-z]+)\.T"'
+            r'[\s\S]*?<h2 class="SearchItem__name[^"]*">([\s\S]*?)</h2>'
+        )
+        results = []
+        seen = set()
+        for m in pattern.finditer(html):
+            code = m.group(1)
+            name = re.sub(r"<[^>]+>", "", m.group(2)).strip()
+            name = re.sub(r"^[\(（]株[\)）]", "", name).strip()
+            if code and code not in seen:
+                seen.add(code)
+                results.append((code, name or code))
+        return results[:10]
+    except Exception:
+        return []
+
+
 @st.cache_data(ttl=21600, show_spinner=False)
 def fetch_cpi_yoy(series_id: str):
     """FREDから物価指数を取得し、前年同月比(%)を計算する"""
@@ -501,17 +530,37 @@ if search_query.strip():
                     st.session_state["pinned_codes"].append(m["code"])
                     st.rerun()
     else:
-        st.sidebar.caption("今のリストには見つかりませんでした。")
-        if st.sidebar.button(f"証券コード「{q_upper}」で新規に検索する", key="new_code_search_btn"):
-            name = fetch_company_name(q_upper)
-            if name:
-                st.session_state["extra_stocks"][q_upper] = name
-                if q_upper not in st.session_state["pinned_codes"]:
-                    st.session_state["pinned_codes"].append(q_upper)
-                st.sidebar.success(f"「{name}」({q_upper}) を追加しました。")
-                st.rerun()
-            else:
-                st.sidebar.error("データが見つかりませんでした。コードをご確認ください（例: 7203, 285A）。")
+        with st.sidebar:
+            with st.spinner("ネットで検索中…"):
+                online_results = search_ticker_by_name(q)
+        online_results = [
+            (c, n) for c, n in online_results if c not in master["code"].values
+        ]
+        if online_results:
+            st.sidebar.caption(f"ネット検索の候補（{len(online_results)}件）")
+            for code, name in online_results:
+                already = code in st.session_state["pinned_codes"]
+                c1, c2 = st.sidebar.columns([3, 1])
+                c1.write(f"{code} {name}")
+                if already:
+                    c2.markdown("✅")
+                else:
+                    if c2.button("＋", key=f"onlinepin_{code}", help="この銘柄を今すぐ一覧に追加"):
+                        st.session_state["extra_stocks"][code] = name
+                        st.session_state["pinned_codes"].append(code)
+                        st.rerun()
+        else:
+            st.sidebar.caption("見つかりませんでした。証券コードが分かれば下で直接検索できます。")
+            if st.sidebar.button(f"証券コード「{q_upper}」として検索する", key="new_code_search_btn"):
+                name = fetch_company_name(q_upper)
+                if name:
+                    st.session_state["extra_stocks"][q_upper] = name
+                    if q_upper not in st.session_state["pinned_codes"]:
+                        st.session_state["pinned_codes"].append(q_upper)
+                    st.sidebar.success(f"「{name}」({q_upper}) を追加しました。")
+                    st.rerun()
+                else:
+                    st.sidebar.error("データが見つかりませんでした。会社名の表記や証券コードをご確認ください。")
 
 if st.session_state["pinned_codes"]:
     st.sidebar.markdown("**📌 追加した銘柄（下の一覧に自動で表示されます）**")
