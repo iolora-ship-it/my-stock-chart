@@ -94,6 +94,20 @@ CPI_SERIES = [
     },
 ]
 
+# セクターが多いので、業種グループにまとめてサイドバーを見やすくする
+SECTOR_GROUPS = {
+    "素材・化学": ["化学", "医薬品", "石油・石炭製品", "ゴム製品", "ガラス・土石製品", "鉄鋼", "非鉄金属", "金属製品", "パルプ・紙", "繊維製品"],
+    "機械・電機": ["機械", "電気機器", "半導体", "精密機器"],
+    "自動車・輸送機器": ["輸送用機器"],
+    "食品・消費財": ["食料品", "日用品・化粧品", "その他製品", "ゲーム"],
+    "建設・不動産": ["建設業", "不動産業"],
+    "電力・ガス": ["電気・ガス業"],
+    "運輸": ["陸運業", "海運業", "空運業", "倉庫・運輸関連業"],
+    "商社・小売": ["卸売業", "アパレル小売", "スーパー・総合小売", "家具・生活雑貨", "リユース・中古", "百貨店", "外食", "ドラッグストア"],
+    "金融": ["銀行業", "証券・商品先物取引業", "保険業", "その他金融業"],
+    "情報・サービス": ["情報・通信業", "ITサービス", "広告", "ネットサービス", "人材サービス", "レジャー・エンタメ"],
+}
+
 
 # ---------------------------------------------------------------------------
 # 見た目（配色・レイアウト・フォント・アニメーション）
@@ -423,6 +437,52 @@ def pct_change_over_period(df: pd.DataFrame, start: dt.date, end: dt.date):
     return pct, base_price, latest_price
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def compute_sector_momentum(df: pd.DataFrame, start: dt.date, end: dt.date, sample_per_sector: int = 3) -> pd.DataFrame:
+    """セクターごとに代表銘柄を数本サンプリングし、平均騰落率で「勢い」を算出する（まとめて一括取得して高速化）"""
+    sample_rows = df.groupby("sector", group_keys=False).head(sample_per_sector)
+    tickers = [f"{c}.T" for c in sample_rows["code"]]
+    if not tickers:
+        return pd.DataFrame(columns=["sector", "avg_pct", "sample_n"])
+    try:
+        raw = yf.download(
+            tickers,
+            start=start - dt.timedelta(days=10),
+            end=end + dt.timedelta(days=1),
+            progress=False,
+            auto_adjust=False,
+            group_by="ticker",
+            threads=True,
+        )
+    except Exception:
+        return pd.DataFrame(columns=["sector", "avg_pct", "sample_n"])
+
+    sector_pcts = {}
+    for _, r in sample_rows.iterrows():
+        code = r["code"]
+        sector = r["sector"]
+        ticker = f"{code}.T"
+        try:
+            if isinstance(raw.columns, pd.MultiIndex):
+                if ticker not in raw.columns.get_level_values(0):
+                    continue
+                sub = raw[ticker]
+            else:
+                sub = raw
+            sub = sub.dropna(subset=["Close"]) if "Close" in sub.columns else sub.dropna(how="all")
+            pct, _, _ = pct_change_over_period(sub, start, end)
+            if pct is not None:
+                sector_pcts.setdefault(sector, []).append(pct)
+        except Exception:
+            continue
+
+    rows = [
+        {"sector": s, "avg_pct": sum(v) / len(v), "sample_n": len(v)}
+        for s, v in sector_pcts.items()
+    ]
+    return pd.DataFrame(rows)
+
+
 def pct_color(v):
     if v is None:
         return NEUTRAL_COLOR
@@ -582,11 +642,23 @@ view_mode = st.sidebar.radio("銘柄の選び方", ["セクターから選ぶ", 
 groups = load_groups()
 
 if view_mode == "セクターから選ぶ":
-    sectors = ["すべて"] + sorted(master["sector"].unique().tolist())
-    selected_sector = st.sidebar.selectbox("セクター", sectors)
+    all_sectors_in_master = master["sector"].unique().tolist()
+    group_names = ["すべて"] + list(SECTOR_GROUPS.keys())
+    selected_group = st.sidebar.selectbox("業種グループ（絞り込み）", group_names)
+
+    if selected_group == "すべて":
+        sectors = ["すべて"] + sorted(all_sectors_in_master)
+    else:
+        group_sectors = set(SECTOR_GROUPS[selected_group]) & set(all_sectors_in_master)
+        sectors = ["すべて"] + sorted(group_sectors)
+
+    selected_sector = st.sidebar.selectbox("セクター", sectors, key=f"sector_select_{selected_group}")
 
     if selected_sector == "すべて":
-        sector_df = master
+        if selected_group == "すべて":
+            sector_df = master
+        else:
+            sector_df = master[master["sector"].isin(sectors[1:])]
     else:
         sector_df = master[master["sector"] == selected_sector]
 
@@ -598,7 +670,7 @@ if view_mode == "セクターから選ぶ":
         "銘柄",
         options=sector_df["label"].tolist(),
         default=sector_df["label"].tolist()[:default_n],
-        key=f"stock_select_{selected_sector}",
+        key=f"stock_select_{selected_group}_{selected_sector}",
     )
     selected_codes = [lbl.split(" ")[0] for lbl in selected_labels]
 else:
@@ -707,6 +779,51 @@ for col, ind in zip(idx_cols, MARKET_INDICATORS):
         else:
             st.metric(ind["label"], "取得できません", help=ind["help"])
 st.caption(f"📅 上の指標は選択中の期間「{period_choice}」でのトータル変化率です。")
+
+st.markdown("")
+
+# ---------------------------------------------------------------------------
+# セクターの勢い（上位・下位）— トップページのハイライト
+# ---------------------------------------------------------------------------
+st.markdown("### 🔥 セクターの勢い")
+st.caption(f"各セクターの代表銘柄をもとにした、期間「{period_choice}」の平均騰落率ランキングです。")
+
+with st.spinner("セクターの勢いを計算中…"):
+    sector_momentum = compute_sector_momentum(master_base, start_date, end_date)
+
+if sector_momentum.empty:
+    st.caption("セクターの勢いを取得できませんでした。")
+else:
+    sector_momentum = sector_momentum.sort_values("avg_pct", ascending=False).reset_index(drop=True)
+    top_n = min(5, len(sector_momentum) // 2) if len(sector_momentum) >= 2 else len(sector_momentum)
+    top_n = max(top_n, 1)
+    gainers = sector_momentum.head(top_n)
+    losers = sector_momentum.tail(top_n).sort_values("avg_pct")
+
+    def _sector_row_html(r):
+        color = pct_color(r["avg_pct"])
+        arrow = pct_arrow(r["avg_pct"])
+        return f"""
+        <div class="stock-card" style="padding:10px 18px; margin-bottom:8px;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <span class="name" style="font-size:0.95rem;">{r['sector']}</span>
+                <span class="pct" style="font-size:1.1rem; color:{color};">{arrow} {r['avg_pct']:+.2f}%</span>
+            </div>
+        </div>
+        """
+
+    col_g, col_l = st.columns(2)
+    with col_g:
+        st.markdown("**📈 勢いのあるセクター（上昇幅が大きい）**")
+        for _, r in gainers.iterrows():
+            st.markdown(_sector_row_html(r), unsafe_allow_html=True)
+    with col_l:
+        st.markdown("**📉 勢いのないセクター（下落幅が大きい）**")
+        for _, r in losers.iterrows():
+            st.markdown(_sector_row_html(r), unsafe_allow_html=True)
+    st.caption("👈 気になるセクターがあれば、左のサイドバーの「業種グループ」→「セクター」で絞り込んで見てみましょう。")
+
+st.markdown("")
 
 with st.expander("📎 物価指数（CPI）を見る"):
     cpi_cols = st.columns(len(CPI_SERIES))
