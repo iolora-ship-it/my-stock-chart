@@ -11,7 +11,7 @@
 機能:
   - トップに日経平均・SOX指数・ドル円・米国10年金利、CPI(日米)を表示（用語説明つき、選択期間に連動）
   - stocks.csv に登録した銘柄をセクターごとに一覧・比較
-  - 証券コードを直接入力して、どんな銘柄でもその場で検索・追加できる
+  - サイドバー上部で銘柄名・証券コードを検索し、その場で一覧に追加できる
   - お気に入りグループを作成して、好きな銘柄をまとめて管理できる
   - 1日〜1年まで細かく期間を指定してトータルの騰落率(%)を表示
   - 大きなローソク足チャート。クリックした地点の株価をピン留め表示
@@ -128,6 +128,25 @@ def inject_style():
         section[data-testid="stSidebar"] .stMultiSelect label {
             font-weight: 700;
             font-size: 0.95rem;
+        }
+        /* 入力欄・プルダウンは白背景なので、文字は濃色にして見やすくする */
+        section[data-testid="stSidebar"] input,
+        section[data-testid="stSidebar"] textarea,
+        section[data-testid="stSidebar"] [data-baseweb="select"] * {
+            color: #1a1a1a !important;
+        }
+        section[data-testid="stSidebar"] input::placeholder {
+            color: #8a8f98 !important;
+        }
+        /* 成功・エラーなどの通知ボックスも背景が明るいので文字を濃色に */
+        section[data-testid="stSidebar"] [data-testid="stAlert"],
+        section[data-testid="stSidebar"] [data-testid="stAlert"] * {
+            color: #1a1a1a !important;
+        }
+        /* サイドバー内のボタンも背景が明るいので文字を濃色に */
+        section[data-testid="stSidebar"] button,
+        section[data-testid="stSidebar"] button * {
+            color: #1a1a1a !important;
         }
 
         /* ヘッダー帯 */
@@ -451,6 +470,64 @@ if st.session_state["extra_stocks"]:
 else:
     master = master_base
 
+if "pinned_codes" not in st.session_state:
+    st.session_state["pinned_codes"] = []
+
+st.sidebar.markdown("### 🔍 銘柄を検索して追加")
+search_query = st.sidebar.text_input(
+    "銘柄名 または 証券コードで検索",
+    key="stock_search_query",
+    placeholder="例: トヨタ / 7203 / 285A",
+)
+
+if search_query.strip():
+    q = search_query.strip()
+    q_upper = q.upper()
+    match_df = master[
+        master["name"].str.contains(q, case=False, na=False, regex=False)
+        | master["code"].str.upper().str.contains(q_upper, na=False, regex=False)
+    ].head(8)
+
+    if not match_df.empty:
+        st.sidebar.caption(f"「{q}」に一致する銘柄（{len(match_df)}件）")
+        for _, m in match_df.iterrows():
+            already = m["code"] in st.session_state["pinned_codes"]
+            c1, c2 = st.sidebar.columns([3, 1])
+            c1.write(f"{m['code']} {m['name']}")
+            if already:
+                c2.markdown("✅")
+            else:
+                if c2.button("＋", key=f"pin_{m['code']}", help="この銘柄を今すぐ一覧に追加"):
+                    st.session_state["pinned_codes"].append(m["code"])
+                    st.rerun()
+    else:
+        st.sidebar.caption("今のリストには見つかりませんでした。")
+        if st.sidebar.button(f"証券コード「{q_upper}」で新規に検索する", key="new_code_search_btn"):
+            name = fetch_company_name(q_upper)
+            if name:
+                st.session_state["extra_stocks"][q_upper] = name
+                if q_upper not in st.session_state["pinned_codes"]:
+                    st.session_state["pinned_codes"].append(q_upper)
+                st.sidebar.success(f"「{name}」({q_upper}) を追加しました。")
+                st.rerun()
+            else:
+                st.sidebar.error("データが見つかりませんでした。コードをご確認ください（例: 7203, 285A）。")
+
+if st.session_state["pinned_codes"]:
+    st.sidebar.markdown("**📌 追加した銘柄（下の一覧に自動で表示されます）**")
+    for c in list(st.session_state["pinned_codes"]):
+        if c in master["code"].values:
+            nm = master.loc[master["code"] == c, "name"].values[0]
+        else:
+            nm = st.session_state["extra_stocks"].get(c, c)
+        c1, c2 = st.sidebar.columns([3, 1])
+        c1.write(f"{c} {nm}")
+        if c2.button("✕", key=f"unpin_{c}", help="表示から外す"):
+            st.session_state["pinned_codes"].remove(c)
+            st.rerun()
+
+st.sidebar.markdown("---")
+
 view_mode = st.sidebar.radio("銘柄の選び方", ["セクターから選ぶ", "⭐ グループから選ぶ"])
 
 groups = load_groups()
@@ -492,6 +569,16 @@ else:
         if missing > 0:
             st.sidebar.caption(f"⚠️ {missing}件、現在のリストで見つからない銘柄があります。")
 
+# 検索して追加した銘柄（📌）は、セクター/グループの選択にかかわらず必ず一覧に表示する
+for c in st.session_state["pinned_codes"]:
+    if c not in selected_codes:
+        if c in master["code"].values:
+            nm = master.loc[master["code"] == c, "name"].values[0]
+        else:
+            nm = st.session_state["extra_stocks"].get(c, c)
+        selected_codes.append(c)
+        selected_labels.append(f"{c} {nm}")
+
 period_choice = st.sidebar.radio(
     "期間",
     list(PERIOD_PRESETS.keys()),
@@ -517,22 +604,6 @@ else:
     end_date = today
 
 st.sidebar.markdown("---")
-with st.sidebar.expander("🔍 銘柄コードで直接追加"):
-    st.caption("stocks.csv に無い銘柄も、証券コードが分かればその場で追加できます（このセッション中のみ有効）。")
-    search_code = st.text_input("証券コード（例: 7203, 285A）", key="search_code_input")
-    if st.button("検索して追加", key="search_code_btn"):
-        code_clean = search_code.strip().upper()
-        if not code_clean:
-            st.warning("証券コードを入力してください。")
-        else:
-            name = fetch_company_name(code_clean)
-            if name:
-                st.session_state["extra_stocks"][code_clean] = name
-                st.success(f"「{name}」({code_clean}) を追加しました。セクターで「🔍 検索で追加した銘柄」を選ぶと見られます。")
-                st.rerun()
-            else:
-                st.error("データが見つかりませんでした。コードをご確認ください。")
-
 with st.sidebar.expander("⭐ グループを管理"):
     new_group_name = st.text_input("新しいグループ名", key="new_group_name")
     if st.button("グループを作成", key="create_group_btn"):
@@ -568,16 +639,6 @@ with st.sidebar.expander("⭐ グループを管理"):
             st.success("グループを削除しました。")
             st.rerun()
     st.caption("⚠️ グループ情報はアプリのサーバーに保存されます。今後アプリの機能追加・修正で更新すると、リセットされる場合があります。")
-
-with st.sidebar.expander("銘柄をずっとリストに残したい場合"):
-    st.caption(
-        "上の「🔍 銘柄コードで直接追加」が一番かんたんです。ただしページを閉じると消えます。"
-        "ずっと残したい場合は「⭐ グループを管理」でお気に入りグループに入れてください。"
-    )
-    st.caption(
-        "（上級者向け）stocks.csv というファイルに `code,name,sector` の形式で行を追加すると、"
-        "全員から見えるセクター一覧に恒久的に追加できます。"
-    )
 
 # ---------------------------------------------------------------------------
 # 市場ダッシュボード（選択中の期間に連動）
