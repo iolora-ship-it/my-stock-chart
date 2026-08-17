@@ -271,6 +271,18 @@ def inject_style():
             background: #f1f2f4;
             color: #9aa0a6;
         }
+        .stock-card .yahoo-link {
+            display: inline-block;
+            margin-top: 6px;
+            font-size: 0.78rem;
+            font-weight: 600;
+            color: #6b46c1;
+            text-decoration: none;
+            border-bottom: 1px solid transparent;
+        }
+        .stock-card .yahoo-link:hover {
+            border-bottom: 1px solid #6b46c1;
+        }
 
         /* クリックした株価のピン留め表示 */
         .pin-price {
@@ -885,6 +897,7 @@ with tab1:
         )
         badge_class = "badge" if r["earnings"] else "badge badge-none"
         badge_text = r["earnings"] if r["earnings"] else "決算情報なし"
+        yahoo_url = f"https://finance.yahoo.co.jp/quote/{r['code']}.T"
 
         st.markdown(
             f"""
@@ -894,6 +907,7 @@ with tab1:
                         <span class="name">{r['name']}</span>
                         <span class="code">{r['code']}</span>
                         <div class="price">{price_text}</div>
+                        <a class="yahoo-link" href="{yahoo_url}" target="_blank" rel="noopener noreferrer">Yahoo!ファイナンスで見る →</a>
                     </div>
                     <div style="text-align:right;">
                         <div class="pct" style="color:{color};">{arrow} {pct_text}</div>
@@ -910,6 +924,7 @@ with tab2:
     focus_label = st.selectbox("銘柄を選択", options=selected_labels)
     focus_code = focus_label.split(" ")[0]
     focus_name = master.loc[master["code"] == focus_code, "name"].values[0]
+    st.caption(f"🔗 詳しく調べる → [Yahoo!ファイナンスで{focus_name}を見る](https://finance.yahoo.co.jp/quote/{focus_code}.T)")
 
     chart_days = st.select_slider(
         "表示期間",
