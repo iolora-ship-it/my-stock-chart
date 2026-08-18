@@ -14,17 +14,25 @@
   - サイドバー上部で銘柄名・証券コードを検索し、その場で一覧に追加できる
   - お気に入りグループを作成して、好きな銘柄をまとめて管理できる
   - 1日〜1年まで細かく期間を指定してトータルの騰落率(%)を表示
-  - 大きなローソク足チャート。クリックした地点の株価をピン留め表示
+  - 大きなローソク足チャート（25日/75日移動平均線・出来高・RSIを併記）。クリックした地点の株価をピン留め表示
   - 決算発表日をカード・カレンダー表の両方で確認できる
+  - PER・PBR・配当利回り・時価総額などのファンダメンタルズ指標を表示
+  - 出来高から「薄商い」銘柄を検知し、データの信頼度が低い可能性を注意表示
+  - PER上限・配当利回り下限・薄商い除外でのスクリーニング（絞り込み）
+  - 保有銘柄・株数・取得単価を登録できるポートフォリオ機能（評価額・含み損益を表示）
+  - 専門用語（PER・PBR・RSIなど）にはカーソルを合わせると説明が出るツールチップ＋用語集
 """
 
 import datetime as dt
 import json
 import os
 import re
+import time
+import uuid
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import requests
 import streamlit as st
 import yfinance as yf
@@ -33,6 +41,27 @@ st.set_page_config(page_title="My Stock Chart", layout="wide", page_icon="📈")
 
 STOCKS_CSV = "stocks.csv"
 GROUPS_FILE = "groups.json"
+PORTFOLIO_FILE = "portfolio.json"
+
+# 1日あたりの平均売買代金がこれを下回る銘柄は「薄商い」として注意バッジを表示する
+# （出来高が極端に少ない銘柄は、株価データが実勢を反映していない・更新が古いことがあるため）
+LIQUIDITY_THIN_THRESHOLD = 30_000_000  # 3,000万円/日
+
+# 用語集（カード上のツールチップ・用語集エキスパンダーの両方で使う）
+GLOSSARY = {
+    "PER": "株価収益率（Price Earnings Ratio）。株価が1株当たり利益(EPS)の何倍かを示す指標です。数値が低いほど利益に対して株価が割安と判断されることが多いですが、業種によって適正水準は異なります。",
+    "PBR": "株価純資産倍率（Price Book-value Ratio）。株価が1株当たり純資産(BPS)の何倍かを示す指標です。1倍が理論上の解散価値の目安とされ、1倍を下回ると割安と判断されることがあります。",
+    "配当利回り": "1株当たり年間配当金を現在の株価で割った割合です。株価に対してどれだけ配当を受け取れるかの目安になりますが、業績悪化で減配・無配になるリスクもあります。",
+    "時価総額": "株価 × 発行済株式数で計算される、企業の市場価値の大きさを示す指標です。数値が大きいほど大企業・値動きが相対的に安定しやすい傾向があります。",
+    "出来高": "一定期間内に売買が成立した株数（または金額）です。出来高が少ない「薄商い」の銘柄は、株価データが実勢を反映しにくく、急な値動きが出やすい傾向があります。",
+    "移動平均線": "一定期間（例: 25日・75日）の終値の平均値を結んだ線です。株価そのものより滑らかに動くため、上昇・下降トレンドの方向性を把握するのに使われます。",
+    "RSI": "相対力指数（Relative Strength Index）。一定期間の値上がり幅と値下がり幅の比率から算出される、0〜100で表されるテクニカル指標です。一般に70以上で「買われすぎ」、30以下で「売られすぎ」の目安とされますが、あくまで参考値です。",
+}
+
+
+def glossary_help(*terms: str) -> str:
+    """複数の用語をまとめてツールチップ用の説明文にする"""
+    return "\n\n".join(f"【{t}】{GLOSSARY[t]}" for t in terms if t in GLOSSARY)
 
 PERIOD_PRESETS = {
     "1日": 1,
@@ -271,6 +300,39 @@ def inject_style():
             background: #f1f2f4;
             color: #9aa0a6;
         }
+        .stock-card .badge-thin {
+            background: #fdecec;
+            color: #c0392b;
+            margin-left: 6px;
+        }
+        .stock-card .fundamentals-row {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px dashed #eceef1;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px 14px;
+        }
+        .stock-card .fundamentals-row span {
+            font-size: 0.78rem;
+            color: #6b7280;
+            cursor: help;
+        }
+        .portfolio-summary {
+            background: linear-gradient(120deg, #14192b, #262f4a);
+            color: #ffffff;
+            border-radius: 14px;
+            padding: 18px 22px;
+            margin-bottom: 14px;
+        }
+        .portfolio-summary .label {
+            font-size: 0.8rem;
+            color: #b9c0d6;
+        }
+        .portfolio-summary .value {
+            font-size: 1.5rem;
+            font-weight: 800;
+        }
         .stock-card .yahoo-link {
             display: inline-block;
             margin-top: 6px;
@@ -304,6 +366,21 @@ def inject_style():
 # ---------------------------------------------------------------------------
 # データ取得
 # ---------------------------------------------------------------------------
+def _with_retry(fn, retries: int = 2, delay: float = 0.8):
+    """yfinance/外部APIは一時的なタイムアウト・レート制限で失敗することがあるため、
+    短い間隔を空けて数回リトライしてから諦める。"""
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            return fn()
+        except Exception as e:
+            last_exc = e
+            if attempt < retries:
+                time.sleep(delay)
+    if last_exc is not None:
+        raise last_exc
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def load_master(path: str) -> pd.DataFrame:
     df = pd.read_csv(path, dtype={"code": str})
@@ -314,14 +391,18 @@ def load_master(path: str) -> pd.DataFrame:
 def fetch_history(ticker_code: str, start: dt.date, end: dt.date, is_index: bool = False) -> pd.DataFrame:
     """コードから .T ティッカーで日足OHLCを取得（指数の場合はそのままのティッカーを使用）"""
     ticker = ticker_code if is_index else f"{ticker_code}.T"
-    try:
-        df = yf.download(
+
+    def _do():
+        return yf.download(
             ticker,
             start=start - dt.timedelta(days=10),
             end=end + dt.timedelta(days=1),
             progress=False,
             auto_adjust=False,
         )
+
+    try:
+        df = _with_retry(_do)
     except Exception:
         return pd.DataFrame()
     if isinstance(df.columns, pd.MultiIndex):
@@ -334,10 +415,102 @@ def fetch_history(ticker_code: str, start: dt.date, end: dt.date, is_index: bool
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
+def fetch_fundamentals(code: str) -> dict:
+    """PER・PBR・配当利回り・時価総額を取得する（取得できない項目は None）。
+    yfinanceのinfo取得は失敗しやすいため、リトライしたうえで
+    全滅した場合も空の辞書ではなく全項目Noneの辞書を返し、呼び出し側の分岐を簡単にする。"""
+    empty = {"per": None, "pbr": None, "dividend_yield": None, "market_cap": None}
+
+    def _do():
+        t = yf.Ticker(f"{code}.T")
+        return t.info or {}
+
+    try:
+        info = _with_retry(_do)
+    except Exception:
+        return empty
+    if not info:
+        return empty
+    return {
+        "per": info.get("trailingPE"),
+        "pbr": info.get("priceToBook"),
+        "dividend_yield": info.get("dividendYield"),
+        "market_cap": info.get("marketCap"),
+    }
+
+
+def compute_liquidity(hist: pd.DataFrame, window: int = 20):
+    """直近window営業日の平均出来高・平均売買代金(円)を計算する。
+    薄商い銘柄の検知に使う。"""
+    if hist is None or hist.empty or "Volume" not in hist.columns or "Close" not in hist.columns:
+        return None, None
+    recent = hist.tail(window)
+    recent = recent.dropna(subset=["Volume", "Close"])
+    if recent.empty:
+        return None, None
+    avg_volume = float(recent["Volume"].mean())
+    avg_value = float((recent["Volume"] * recent["Close"]).mean())
+    return avg_volume, avg_value
+
+
+def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
+    """簡易RSI（相対力指数）を計算する。0〜100で、70以上=買われすぎ、30以下=売られすぎの目安。"""
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=period, min_periods=period).mean()
+    avg_loss = loss.rolling(window=period, min_periods=period).mean()
+    rs = avg_gain / avg_loss.replace(0, pd.NA)
+    rsi = 100 - (100 / (1 + rs))
+    # 値下がりが一度もない区間はavg_loss=0でRSIが未定義になるため100（買われすぎ側の極値）とする
+    rsi = rsi.fillna(100)
+    rsi[avg_gain.isna()] = pd.NA
+    return rsi
+
+
+def format_ratio(v, unit: str = "倍") -> str:
+    if v is None or pd.isna(v) or v <= 0:
+        return "―"
+    return f"{v:.1f}{unit}"
+
+
+def format_dividend_yield(v) -> str:
+    if v is None or pd.isna(v):
+        return "―"
+    # yfinanceのdividendYieldは版によって「0.023」(比率)と「2.3」(％そのもの)が混在するため、
+    # 1未満なら比率とみなして100倍する
+    pct = v * 100 if v < 1 else v
+    if pct <= 0:
+        return "―"
+    return f"{pct:.2f}%"
+
+
+def format_market_cap(v) -> str:
+    if v is None or pd.isna(v) or v <= 0:
+        return "―"
+    if v >= 1e12:
+        return f"{v / 1e12:.2f}兆円"
+    if v >= 1e8:
+        return f"{v / 1e8:,.0f}億円"
+    return f"{v:,.0f}円"
+
+
+def format_trading_value(v) -> str:
+    if v is None or pd.isna(v) or v <= 0:
+        return "―"
+    if v >= 1e8:
+        return f"{v / 1e8:,.1f}億円/日"
+    if v >= 1e4:
+        return f"{v / 1e4:,.0f}万円/日"
+    return f"{v:,.0f}円/日"
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_company_name(code: str):
     """証券コードから会社名を取得（見つからない/データが無い場合は None）"""
     ticker = f"{code}.T"
-    try:
+
+    def _do():
         t = yf.Ticker(ticker)
         hist = t.history(period="5d")
         if hist is None or hist.empty:
@@ -347,8 +520,10 @@ def fetch_company_name(code: str):
             info = t.info or {}
         except Exception:
             info = {}
-        name = info.get("longName") or info.get("shortName") or code
-        return name
+        return info.get("longName") or info.get("shortName") or code
+
+    try:
+        return _with_retry(_do)
     except Exception:
         return None
 
@@ -411,12 +586,16 @@ def fetch_cpi_yoy(series_id: str):
 def fetch_earnings_dates(code: str) -> list:
     """決算発表日の一覧を取得(取得できない銘柄もあるためtry/exceptで保護)"""
     ticker = f"{code}.T"
-    try:
+
+    def _do():
         t = yf.Ticker(ticker)
         edf = t.get_earnings_dates(limit=12)
         if edf is None or edf.empty:
             return []
         return sorted(d.date() for d in edf.index.to_pydatetime())
+
+    try:
+        return _with_retry(_do)
     except Exception:
         return []
 
@@ -543,6 +722,39 @@ def save_groups(groups: dict):
             json.dump(groups, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# ポートフォリオ（保有銘柄）の読み書き
+# ---------------------------------------------------------------------------
+def load_portfolio() -> list:
+    """保有銘柄のリストを読み込む。各要素は
+    {id, code, shares, cost}（cost=取得単価/株）"""
+    if os.path.exists(PORTFOLIO_FILE):
+        try:
+            with open(PORTFOLIO_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+        except Exception:
+            return []
+    return []
+
+
+def save_portfolio(holdings: list):
+    try:
+        with open(PORTFOLIO_FILE, "w", encoding="utf-8") as f:
+            json.dump(holdings, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def get_latest_price(code: str):
+    """ポートフォリオの評価額計算用に、直近の終値を1件だけ取得する"""
+    hist = fetch_history(code, dt.date.today() - dt.timedelta(days=14), dt.date.today())
+    if hist.empty:
+        return None
+    return float(hist["Close"].iloc[-1])
 
 
 # ---------------------------------------------------------------------------
@@ -861,6 +1073,10 @@ with st.expander("📎 物価指数（CPI）を見る"):
                 st.metric(series["label"], "取得できません", help=series["help"])
     st.caption("データ提供: FRED（セントルイス連銀）。月次更新のため、日々の値動きとはタイミングが異なります。")
 
+with st.expander("📖 用語集（PER・PBR・配当利回り・RSIなど）"):
+    for term, desc in GLOSSARY.items():
+        st.markdown(f"**{term}**：{desc}")
+
 st.markdown("")
 
 if not selected_codes:
@@ -877,6 +1093,8 @@ with st.spinner("株価データを取得中です…"):
         hist = fetch_history(code, start_date, end_date)
         pct, base_p, latest_p = pct_change_over_period(hist, start_date, end_date)
         earnings_dates = fetch_earnings_dates(code)
+        fundamentals = fetch_fundamentals(code)
+        avg_volume, avg_value = compute_liquidity(hist)
         rows.append(
             {
                 "code": code,
@@ -886,18 +1104,62 @@ with st.spinner("株価データを取得中です…"):
                 "latest_p": round(latest_p, 1) if latest_p is not None else None,
                 "earnings": next_earnings_label(earnings_dates, today),
                 "earnings_raw": earnings_dates,
+                "per": fundamentals.get("per"),
+                "pbr": fundamentals.get("pbr"),
+                "dividend_yield": fundamentals.get("dividend_yield"),
+                "market_cap": fundamentals.get("market_cap"),
+                "avg_volume": avg_volume,
+                "avg_value": avg_value,
+                "is_thin": (avg_value is not None) and (avg_value < LIQUIDITY_THIN_THRESHOLD),
             }
         )
 
 result_df = pd.DataFrame(rows).sort_values("pct", ascending=False, na_position="last")
 
-tab1, tab2, tab3 = st.tabs(["📊 セクター比較", "🕯️ 個別チャート", "🗓️ 決算カレンダー"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 セクター比較", "🕯️ 個別チャート", "🗓️ 決算カレンダー", "💼 ポートフォリオ"])
 
 # --- タブ1: セクター比較 ---------------------------------------------------
 with tab1:
     st.caption(f"「{selected_sector}」・直近{period_choice}のトータル騰落率")
 
-    for _, r in result_df.iterrows():
+    with st.expander("🔎 絞り込み条件（スクリーニング）"):
+        f1, f2, f3 = st.columns(3)
+        with f1:
+            per_max = st.number_input(
+                "PER 上限（倍）", min_value=0.0, value=0.0, step=1.0,
+                help=glossary_help("PER") + "\n\n0のときは絞り込みません。",
+            )
+        with f2:
+            dy_min = st.number_input(
+                "配当利回り 下限（%）", min_value=0.0, value=0.0, step=0.1,
+                help=glossary_help("配当利回り") + "\n\n0のときは絞り込みません。",
+            )
+        with f3:
+            exclude_thin = st.checkbox(
+                "薄商い銘柄を除外する",
+                value=False,
+                help=glossary_help("出来高")
+                + f"\n\n平均売買代金が{LIQUIDITY_THIN_THRESHOLD:,}円/日を下回る銘柄を一覧から除外します。",
+            )
+
+    filtered_df = result_df.copy()
+    if per_max > 0:
+        filtered_df = filtered_df[filtered_df["per"].apply(lambda v: pd.notna(v) and 0 < v <= per_max)]
+    if dy_min > 0:
+        def _dy_pct(v):
+            if pd.isna(v):
+                return None
+            return v * 100 if v < 1 else v
+        filtered_df = filtered_df[filtered_df["dividend_yield"].apply(lambda v: (_dy_pct(v) or -1) >= dy_min)]
+    if exclude_thin:
+        filtered_df = filtered_df[~filtered_df["is_thin"].fillna(False)]
+
+    if filtered_df.empty:
+        st.warning("絞り込み条件に一致する銘柄がありませんでした。条件を緩めてみてください。")
+    else:
+        st.caption(f"表示中: {len(filtered_df)} / {len(result_df)} 銘柄")
+
+    for _, r in filtered_df.iterrows():
         color = pct_color(r["pct"])
         arrow = pct_arrow(r["pct"])
         pct_text = f"{r['pct']:+.2f}%" if pd.notna(r["pct"]) else "取得できません"
@@ -910,6 +1172,17 @@ with tab1:
         badge_class = "badge" if pd.notna(r["earnings"]) else "badge badge-none"
         badge_text = r["earnings"] if pd.notna(r["earnings"]) else "決算情報なし"
         yahoo_url = f"https://finance.yahoo.co.jp/quote/{r['code']}.T"
+
+        per_text = format_ratio(r["per"])
+        pbr_text = format_ratio(r["pbr"])
+        dy_text = format_dividend_yield(r["dividend_yield"])
+        mcap_text = format_market_cap(r["market_cap"])
+        vol_text = format_trading_value(r["avg_value"])
+        thin_badge = (
+            f'<span class="badge badge-thin" title="{GLOSSARY["出来高"]}">⚠ 薄商い</span>'
+            if r["is_thin"]
+            else ""
+        )
 
         st.markdown(
             f"""
@@ -924,7 +1197,15 @@ with tab1:
                     <div style="text-align:right;">
                         <div class="pct" style="color:{color};">{arrow} {pct_text}</div>
                         <span class="{badge_class}">🗓 {badge_text}</span>
+                        {thin_badge}
                     </div>
+                </div>
+                <div class="fundamentals-row">
+                    <span title="{GLOSSARY['PER']}">PER {per_text}</span>
+                    <span title="{GLOSSARY['PBR']}">PBR {pbr_text}</span>
+                    <span title="{GLOSSARY['配当利回り']}">配当利回り {dy_text}</span>
+                    <span title="{GLOSSARY['時価総額']}">時価総額 {mcap_text}</span>
+                    <span title="{GLOSSARY['出来高']}">出来高 {vol_text}</span>
                 </div>
             </div>
             """,
@@ -938,52 +1219,138 @@ with tab2:
     focus_name = master.loc[master["code"] == focus_code, "name"].values[0]
     st.caption(f"🔗 詳しく調べる → [Yahoo!ファイナンスで{focus_name}を見る](https://finance.yahoo.co.jp/quote/{focus_code}.T)")
 
+    focus_fundamentals = fetch_fundamentals(focus_code)
+    fc1, fc2, fc3, fc4 = st.columns(4)
+    with fc1:
+        st.metric("PER", format_ratio(focus_fundamentals.get("per")), help=glossary_help("PER"))
+    with fc2:
+        st.metric("PBR", format_ratio(focus_fundamentals.get("pbr")), help=glossary_help("PBR"))
+    with fc3:
+        st.metric(
+            "配当利回り",
+            format_dividend_yield(focus_fundamentals.get("dividend_yield")),
+            help=glossary_help("配当利回り"),
+        )
+    with fc4:
+        st.metric("時価総額", format_market_cap(focus_fundamentals.get("market_cap")), help=glossary_help("時価総額"))
+
     chart_days = st.select_slider(
         "表示期間",
         options=[10, 30, 60, 90, 180, 365, 730],
         value=180,
         format_func=lambda d: f"{d}日",
     )
+    show_technical = st.checkbox(
+        "テクニカル指標を表示する（移動平均線・出来高・RSI）",
+        value=True,
+        help=glossary_help("移動平均線", "出来高", "RSI"),
+    )
     chart_start = today - dt.timedelta(days=chart_days)
-    hist_full = fetch_history(focus_code, chart_start, today)
-    if not hist_full.empty:
-        hist = hist_full[(hist_full.index.date >= chart_start) & (hist_full.index.date <= today)]
+
+    # 移動平均線(最大75日)が表示期間の最初から途切れないよう、表示開始日より前のぶんも多めに取得する
+    ma_buffer_start = chart_start - dt.timedelta(days=160)
+    hist_ext = fetch_history(focus_code, ma_buffer_start, today)
+    if not hist_ext.empty:
+        hist_ext = hist_ext.sort_index()
+        hist_ext["MA25"] = hist_ext["Close"].rolling(window=25, min_periods=25).mean()
+        hist_ext["MA75"] = hist_ext["Close"].rolling(window=75, min_periods=75).mean()
+        hist_ext["RSI14"] = compute_rsi(hist_ext["Close"], period=14)
+        hist = hist_ext[(hist_ext.index.date >= chart_start) & (hist_ext.index.date <= today)]
         if hist.empty:
-            hist = hist_full
+            hist = hist_ext
     else:
-        hist = hist_full
+        hist = hist_ext
 
     if hist.empty:
         st.warning("株価データを取得できませんでした。銘柄コードや通信環境をご確認ください。")
     else:
-        fig = go.Figure(
-            data=[
-                go.Candlestick(
-                    x=hist.index,
-                    open=hist["Open"],
-                    high=hist["High"],
-                    low=hist["Low"],
-                    close=hist["Close"],
-                    increasing_line_color=UP_COLOR,
-                    decreasing_line_color=DOWN_COLOR,
-                    name=focus_name,
-                    hovertemplate=(
-                        "%{x|%Y-%m-%d}<br>"
-                        "始値: %{open:.1f}円<br>"
-                        "高値: %{high:.1f}円<br>"
-                        "安値: %{low:.1f}円<br>"
-                        "終値: %{close:.1f}円<extra></extra>"
-                    ),
-                )
-            ]
+        avg_volume, avg_value = compute_liquidity(hist)
+        if avg_value is not None and avg_value < LIQUIDITY_THIN_THRESHOLD:
+            st.warning(
+                f"⚠ この銘柄は直近の平均売買代金が{format_trading_value(avg_value)}と少なめです（薄商い）。"
+                "株価データが実勢の値動きを反映しにくく、急な値動きが出やすいので参考程度にご覧ください。"
+            )
+
+        if show_technical:
+            fig = make_subplots(
+                rows=3,
+                cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.04,
+                row_heights=[0.55, 0.18, 0.27],
+            )
+        else:
+            fig = make_subplots(rows=1, cols=1)
+
+        fig.add_trace(
+            go.Candlestick(
+                x=hist.index,
+                open=hist["Open"],
+                high=hist["High"],
+                low=hist["Low"],
+                close=hist["Close"],
+                increasing_line_color=UP_COLOR,
+                decreasing_line_color=DOWN_COLOR,
+                name=focus_name,
+                hovertemplate=(
+                    "%{x|%Y-%m-%d}<br>"
+                    "始値: %{open:.1f}円<br>"
+                    "高値: %{high:.1f}円<br>"
+                    "安値: %{low:.1f}円<br>"
+                    "終値: %{close:.1f}円<extra></extra>"
+                ),
+            ),
+            row=1,
+            col=1,
         )
+
+        if show_technical:
+            fig.add_trace(
+                go.Scatter(
+                    x=hist.index, y=hist["MA25"], mode="lines", name="25日移動平均線",
+                    line=dict(color="#f5a623", width=1.3),
+                ),
+                row=1, col=1,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=hist.index, y=hist["MA75"], mode="lines", name="75日移動平均線",
+                    line=dict(color="#6b46c1", width=1.3),
+                ),
+                row=1, col=1,
+            )
+
+            volume_colors = [
+                UP_COLOR if c >= o else DOWN_COLOR for o, c in zip(hist["Open"], hist["Close"])
+            ]
+            fig.add_trace(
+                go.Bar(x=hist.index, y=hist["Volume"], name="出来高", marker_color=volume_colors, opacity=0.6),
+                row=2, col=1,
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=hist.index, y=hist["RSI14"], mode="lines", name="RSI(14)",
+                    line=dict(color="#0d6efd", width=1.3),
+                ),
+                row=3, col=1,
+            )
+            fig.add_hline(y=70, row=3, col=1, line_dash="dot", line_color=UP_COLOR, line_width=1)
+            fig.add_hline(y=30, row=3, col=1, line_dash="dot", line_color=DOWN_COLOR, line_width=1)
+            fig.update_yaxes(title_text="株価(円)", row=1, col=1)
+            fig.update_yaxes(title_text="出来高", row=2, col=1)
+            fig.update_yaxes(title_text="RSI", range=[0, 100], row=3, col=1)
+        else:
+            fig.update_yaxes(title_text="株価(円)", row=1, col=1)
 
         earnings_dates = fetch_earnings_dates(focus_code)
         visible_earnings = [
             d for d in earnings_dates if chart_start <= d <= today + dt.timedelta(days=365)
         ]
+        vline_rows = (1, 2, 3) if show_technical else (1,)
         for d in visible_earnings:
-            fig.add_vline(x=pd.Timestamp(d), line_width=1, line_dash="dash", line_color="#f5a623")
+            for rw in vline_rows:
+                fig.add_vline(x=pd.Timestamp(d), row=rw, col=1, line_width=1, line_dash="dash", line_color="#f5a623")
         if visible_earnings:
             fig.add_annotation(
                 x=pd.Timestamp(visible_earnings[0]),
@@ -998,13 +1365,12 @@ with tab2:
         fig.update_layout(
             title=f"{focus_code} {focus_name}",
             xaxis_title=None,
-            yaxis_title="株価(円)",
-            xaxis_rangeslider_visible=False,
             hovermode="x unified",
-            height=680,
+            height=820 if show_technical else 600,
             margin=dict(t=50, b=10, l=10, r=10),
             plot_bgcolor="white",
             dragmode="zoom",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
         # 土日は取引がなく空白になるため、詰めて表示する（短い期間ほど間延びして見づらくなるのを防ぐ）
         fig.update_xaxes(
@@ -1020,7 +1386,7 @@ with tab2:
                 use_container_width=True,
                 on_select="rerun",
                 selection_mode=("points",),
-                key=f"candle_{focus_code}_{chart_days}",
+                key=f"candle_{focus_code}_{chart_days}_{show_technical}",
             )
         except TypeError:
             # 古いバージョンのStreamlitでは on_select 未対応 → 通常表示にフォールバック
@@ -1038,10 +1404,13 @@ with tab2:
                     points = sel.get("points") if isinstance(sel, dict) else getattr(sel, "points", None)
                 if points:
                     p0 = points[0]
-                    idx = p0.get("point_index") if isinstance(p0, dict) else getattr(p0, "point_index", None)
-                    if idx is not None and 0 <= idx < len(hist):
-                        clicked_row = hist.iloc[idx]
-                        clicked_date = hist.index[idx].date()
+                    curve_num = p0.get("curve_number") if isinstance(p0, dict) else getattr(p0, "curve_number", None)
+                    # ローソク足(trace 0)以外（移動平均線・出来高・RSI）のクリックはピン留め対象外にする
+                    if curve_num is None or curve_num == 0:
+                        idx = p0.get("point_index") if isinstance(p0, dict) else getattr(p0, "point_index", None)
+                        if idx is not None and 0 <= idx < len(hist):
+                            clicked_row = hist.iloc[idx]
+                            clicked_date = hist.index[idx].date()
             except Exception:
                 clicked_row = None
 
@@ -1062,7 +1431,7 @@ with tab2:
             st.caption("チャート上の見たい地点をクリックすると、その日の株価がピン留め表示されます。マウスを合わせるだけでも数値が出ます。")
 
         pct, base_p, latest_p = pct_change_over_period(hist, chart_start, today)
-        m1, m2 = st.columns(2)
+        m1, m2, m3 = st.columns(3)
         with m1:
             if pct is not None:
                 st.metric(label="表示期間トータル騰落率", value=f"{latest_p:.1f} 円", delta=f"{pct:+.2f}%")
@@ -1071,6 +1440,12 @@ with tab2:
                 st.metric(label="直近の決算発表日", value=str(visible_earnings[0]))
             else:
                 st.metric(label="決算発表日", value="情報なし")
+        with m3:
+            st.metric(
+                label="平均出来高（直近20営業日）",
+                value=format_trading_value(avg_value),
+                help=glossary_help("出来高"),
+            )
 
 # --- タブ3: 決算カレンダー -------------------------------------------------
 with tab3:
@@ -1105,3 +1480,132 @@ with tab3:
         else:
             st.dataframe(past, use_container_width=True, hide_index=True)
 
+# --- タブ4: ポートフォリオ -------------------------------------------------
+with tab4:
+    st.caption("保有銘柄・株数・取得単価を登録すると、現在の評価額と含み損益を確認できます。")
+
+    if "portfolio" not in st.session_state:
+        st.session_state["portfolio"] = load_portfolio()
+    portfolio = st.session_state["portfolio"]
+
+    with st.expander("➕ 保有銘柄を追加する", expanded=len(portfolio) == 0):
+        all_labels_pf = (master["code"] + " " + master["name"]).tolist()
+        add_label_pf = st.selectbox("銘柄", options=["選択してください"] + all_labels_pf, key="pf_add_select")
+        pf_c1, pf_c2 = st.columns(2)
+        with pf_c1:
+            add_shares = st.number_input("株数", min_value=0, step=100, value=100, key="pf_add_shares")
+        with pf_c2:
+            add_cost = st.number_input("取得単価（1株あたり・円）", min_value=0.0, step=1.0, value=0.0, key="pf_add_cost")
+        if st.button("ポートフォリオに追加", key="pf_add_btn"):
+            if add_label_pf == "選択してください":
+                st.warning("銘柄を選択してください。")
+            elif add_shares <= 0 or add_cost <= 0:
+                st.warning("株数・取得単価はいずれも0より大きい値を入力してください。")
+            else:
+                add_code = add_label_pf.split(" ")[0]
+                add_name = master.loc[master["code"] == add_code, "name"].values[0]
+                # 同じ銘柄が既にあれば株数を合算し、取得単価は加重平均に更新する
+                existing = next((h for h in portfolio if h["code"] == add_code), None)
+                if existing:
+                    total_shares = existing["shares"] + add_shares
+                    existing["cost"] = (
+                        existing["cost"] * existing["shares"] + add_cost * add_shares
+                    ) / total_shares
+                    existing["shares"] = total_shares
+                else:
+                    portfolio.append(
+                        {
+                            "id": str(uuid.uuid4()),
+                            "code": add_code,
+                            "name": add_name,
+                            "shares": add_shares,
+                            "cost": add_cost,
+                        }
+                    )
+                save_portfolio(portfolio)
+                st.success(f"「{add_name}」を追加しました。")
+                st.rerun()
+
+    if not portfolio:
+        st.info("まだ保有銘柄が登録されていません。上の「➕ 保有銘柄を追加する」から登録してください。")
+    else:
+        total_cost = 0.0
+        total_value = 0.0
+        pf_rows = []
+        with st.spinner("評価額を計算中…"):
+            for h in portfolio:
+                latest_price = get_latest_price(h["code"])
+                cost_amount = h["shares"] * h["cost"]
+                value_amount = h["shares"] * latest_price if latest_price is not None else None
+                pl_amount = (value_amount - cost_amount) if value_amount is not None else None
+                pl_pct = (pl_amount / cost_amount * 100) if (pl_amount is not None and cost_amount > 0) else None
+                total_cost += cost_amount
+                if value_amount is not None:
+                    total_value += value_amount
+                pf_rows.append(
+                    {
+                        **h,
+                        "latest_price": latest_price,
+                        "cost_amount": cost_amount,
+                        "value_amount": value_amount,
+                        "pl_amount": pl_amount,
+                        "pl_pct": pl_pct,
+                    }
+                )
+
+        total_pl = total_value - total_cost
+        total_pl_pct = (total_pl / total_cost * 100) if total_cost > 0 else None
+        summary_color = pct_color(total_pl_pct)
+        st.markdown(
+            f"""
+            <div class="portfolio-summary">
+                <div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:16px;">
+                    <div><div class="label">取得金額合計</div><div class="value">{total_cost:,.0f}円</div></div>
+                    <div><div class="label">評価額合計</div><div class="value">{total_value:,.0f}円</div></div>
+                    <div><div class="label">評価損益</div>
+                        <div class="value" style="color:{summary_color if total_pl_pct is not None else '#ffffff'};">
+                            {total_pl:+,.0f}円 （{f'{total_pl_pct:+.2f}%' if total_pl_pct is not None else '―'}）
+                        </div>
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        for h in pf_rows:
+            color = pct_color(h["pl_pct"])
+            arrow = pct_arrow(h["pl_pct"])
+            price_text = f"{h['latest_price']:.1f}円" if h["latest_price"] is not None else "取得できません"
+            pl_text = (
+                f"{h['pl_amount']:+,.0f}円（{h['pl_pct']:+.2f}%）"
+                if h["pl_amount"] is not None
+                else "評価額を取得できませんでした"
+            )
+            col_card, col_del = st.columns([9, 1])
+            with col_card:
+                st.markdown(
+                    f"""
+                    <div class="stock-card">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <div>
+                                <span class="name">{h['name']}</span>
+                                <span class="code">{h['code']}</span>
+                                <div class="price">{h['shares']:,}株 ／ 取得単価 {h['cost']:,.1f}円 ／ 現在値 {price_text}</div>
+                            </div>
+                            <div style="text-align:right;">
+                                <div class="pct" style="color:{color}; font-size:1.2rem;">{arrow} {pl_text}</div>
+                            </div>
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            with col_del:
+                st.write("")
+                if st.button("✕", key=f"pf_del_{h['id']}", help="この保有銘柄を削除"):
+                    st.session_state["portfolio"] = [x for x in portfolio if x["id"] != h["id"]]
+                    save_portfolio(st.session_state["portfolio"])
+                    st.rerun()
+
+    st.caption("⚠️ ポートフォリオ情報はアプリのサーバーに保存されます。今後アプリの機能追加・修正で更新すると、リセットされる場合があります。また、これは損益の目安表示であり、税金・手数料等は考慮していません。")
