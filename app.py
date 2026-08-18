@@ -63,6 +63,17 @@ def glossary_help(*terms: str) -> str:
     """複数の用語をまとめてツールチップ用の説明文にする"""
     return "\n\n".join(f"【{t}】{GLOSSARY[t]}" for t in terms if t in GLOSSARY)
 
+
+def render_html(html: str):
+    """st.markdown(unsafe_allow_html=True) 用のヘルパー。
+    Streamlitのマークダウン処理は、行頭に空白のみの行が挟まると
+    それ以降の字下げされた行を「インデントコードブロック」とみなし、
+    HTMLタグをそのまま文字列として表示してしまうことがある
+    （f-string内の変数が空文字列になり、空白だけの行ができるケースで特に起きやすい）。
+    各行の前後の空白を取り除いてから渡すことで、常にHTMLとして解釈させる。"""
+    lines = [line.strip() for line in html.strip().splitlines()]
+    st.markdown("\n".join(lines), unsafe_allow_html=True)
+
 PERIOD_PRESETS = {
     "1日": 1,
     "3日": 3,
@@ -219,6 +230,7 @@ def inject_style():
         /* 指標カード（市場ダッシュボード） */
         div[data-testid="stMetric"] {
             background: #ffffff;
+
             border-radius: 14px;
             padding: 14px 16px 10px 16px;
             box-shadow: 0 1px 4px rgba(20, 20, 30, 0.06);
@@ -1049,11 +1061,11 @@ else:
     with col_g:
         st.markdown("**📈 勢いのあるセクター（上昇幅が大きい）**")
         for _, r in gainers.iterrows():
-            st.markdown(_sector_row_html(r), unsafe_allow_html=True)
+            render_html(_sector_row_html(r))
     with col_l:
         st.markdown("**📉 勢いのないセクター（下落幅が大きい）**")
         for _, r in losers.iterrows():
-            st.markdown(_sector_row_html(r), unsafe_allow_html=True)
+            render_html(_sector_row_html(r))
     st.caption("👈 気になるセクターがあれば、左のサイドバーの「業種グループ」→「セクター」で絞り込んで見てみましょう。")
 
 st.markdown("")
@@ -1184,7 +1196,7 @@ with tab1:
             else ""
         )
 
-        st.markdown(
+        render_html(
             f"""
             <div class="stock-card">
                 <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -1208,8 +1220,7 @@ with tab1:
                     <span title="{GLOSSARY['出来高']}">出来高 {vol_text}</span>
                 </div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
 
 # --- タブ2: 個別チャート ---------------------------------------------------
@@ -1415,7 +1426,7 @@ with tab2:
                 clicked_row = None
 
         if clicked_row is not None:
-            st.markdown(
+            render_html(
                 f"""
                 <div class="pin-price">
                     📍 <b>{clicked_date}</b> の株価
@@ -1424,8 +1435,7 @@ with tab2:
                     安値 {clicked_row['Low']:.1f}円 ／
                     終値 <b>{clicked_row['Close']:.1f}円</b>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
         else:
             st.caption("チャート上の見たい地点をクリックすると、その日の株価がピン留め表示されます。マウスを合わせるだけでも数値が出ます。")
@@ -1556,7 +1566,7 @@ with tab4:
         total_pl = total_value - total_cost
         total_pl_pct = (total_pl / total_cost * 100) if total_cost > 0 else None
         summary_color = pct_color(total_pl_pct)
-        st.markdown(
+        render_html(
             f"""
             <div class="portfolio-summary">
                 <div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:16px;">
@@ -1569,8 +1579,7 @@ with tab4:
                     </div>
                 </div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
 
         for h in pf_rows:
@@ -1584,7 +1593,7 @@ with tab4:
             )
             col_card, col_del = st.columns([9, 1])
             with col_card:
-                st.markdown(
+                render_html(
                     f"""
                     <div class="stock-card">
                         <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -1598,8 +1607,7 @@ with tab4:
                             </div>
                         </div>
                     </div>
-                    """,
-                    unsafe_allow_html=True,
+                    """
                 )
             with col_del:
                 st.write("")
