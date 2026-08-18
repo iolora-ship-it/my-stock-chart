@@ -422,25 +422,34 @@ def fetch_earnings_dates(code: str) -> list:
 
 
 def next_earnings_label(earnings_dates: list, today: dt.date):
-    """一覧表示用: 直近の決算発表日を「予定」「発表済」付きで返す"""
+    """一覧表示用: 直近の決算発表日を「予定」「発表済」付きで返す
+    （出来高の少ない銘柄ではYahoo!のデータが数年前で止まっていることがあるため、
+    　あまりに古い過去日は「データなし」扱いにする）
+    """
     if not earnings_dates:
         return None
     future = [d for d in earnings_dates if d >= today]
     if future:
         return f"{future[0]}（予定）"
-    past = [d for d in earnings_dates if d < today]
+    stale_cutoff = today - dt.timedelta(days=730)
+    past = [d for d in earnings_dates if stale_cutoff <= d < today]
     if past:
         return f"{max(past)}（発表済）"
     return None
 
 
 def pct_change_over_period(df: pd.DataFrame, start: dt.date, end: dt.date):
-    """指定期間の始点の終値 → 直近終値のトータル騰落率(%)"""
+    """指定期間の始点の終値 → 直近終値のトータル騰落率(%)
+    出来高が極端に少ない銘柄は該当期間の取引データが1件以下しかないことがあり、
+    その場合は「変化なし(0.00%)」ではなく取得不可として扱う。
+    """
     if df.empty:
         return None, None, None
     window = df[(df.index.date >= start) & (df.index.date <= end)]
-    if window.empty:
+    if len(window) < 2:
         window = df
+    if len(window) < 2:
+        return None, None, None
     base_price = float(window["Close"].iloc[0])
     latest_price = float(window["Close"].iloc[-1])
     if base_price == 0:
@@ -1092,3 +1101,4 @@ with tab3:
             st.caption("発表済みの決算データはありません。")
         else:
             st.dataframe(past, use_container_width=True, hide_index=True)
+
