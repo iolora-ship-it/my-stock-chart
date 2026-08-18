@@ -18,7 +18,9 @@
   - 決算発表日をカード・カレンダー表の両方で確認できる
   - PER・PBR・配当利回り・時価総額などのファンダメンタルズ指標を表示
   - 出来高から「薄商い」銘柄を検知し、データの信頼度が低い可能性を注意表示
-  - PER上限・配当利回り下限・薄商い除外でのスクリーニング（絞り込み）
+  - 出来高急増・急な値動きを検知し、仕手株的な動きの可能性がある銘柄に注意アイコンを表示
+  - 個別チャートに52週高値・安値からの位置を表示
+  - PER上限・配当利回り下限・薄商い除外・値動き急変除外でのスクリーニング（絞り込み）
   - 保有銘柄・株数・取得単価を登録できるポートフォリオ機能（評価額・含み損益を表示）
   - 専門用語（PER・PBR・RSIなど）にはカーソルを合わせると説明が出るツールチップ＋用語集
 """
@@ -47,6 +49,11 @@ PORTFOLIO_FILE = "portfolio.json"
 # （出来高が極端に少ない銘柄は、株価データが実勢を反映していない・更新が古いことがあるため）
 LIQUIDITY_THIN_THRESHOLD = 30_000_000  # 3,000万円/日
 
+# 「値動き急変（仕手株リスク）」バッジの判定基準
+SPEC_VOLUME_SPIKE_RATIO = 3.0   # 直近の出来高が、それ以前の平均出来高の何倍以上で急増とみなすか
+SPEC_DAY_PCT_THRESHOLD = 15.0   # 直近1営業日の値動きが何%以上で急変とみなすか
+SPEC_WEEK_PCT_THRESHOLD = 30.0  # 直近5営業日の値動きが何%以上で急変とみなすか
+
 # 用語集（カード上のツールチップ・用語集エキスパンダーの両方で使う）
 GLOSSARY = {
     "PER": "株価収益率（Price Earnings Ratio）。株価が1株当たり利益(EPS)の何倍かを示す指標です。数値が低いほど利益に対して株価が割安と判断されることが多いですが、業種によって適正水準は異なります。",
@@ -56,6 +63,14 @@ GLOSSARY = {
     "出来高": "一定期間内に売買が成立した株数（または金額）です。出来高が少ない「薄商い」の銘柄は、株価データが実勢を反映しにくく、急な値動きが出やすい傾向があります。",
     "移動平均線": "一定期間（例: 25日・75日）の終値の平均値を結んだ線です。株価そのものより滑らかに動くため、上昇・下降トレンドの方向性を把握するのに使われます。",
     "RSI": "相対力指数（Relative Strength Index）。一定期間の値上がり幅と値下がり幅の比率から算出される、0〜100で表されるテクニカル指標です。一般に70以上で「買われすぎ」、30以下で「売られすぎ」の目安とされますが、あくまで参考値です。",
+    "値動き急変": (
+        "出来高が普段の数倍に急増していたり、短期間で株価が大きく変動している状態です。"
+        "決算や材料の公表など正当な理由による場合もありますが、特定の投資家グループによる"
+        "相場操縦（いわゆる「仕手株」）的な値動きの可能性も否定できません。"
+        "このバッジは統計的な目安に過ぎず、断定的な判断ではない点にご注意ください。"
+        "値動きが荒く損失リスクも大きいため、投資判断は慎重に行ってください。"
+    ),
+    "52週レンジ": "過去52週間（約1年間）の最高値・最安値です。現在値がそのレンジのどのあたりに位置するかで、直近の相対的な高値圏・安値圏を把握する目安になります。",
 }
 
 
@@ -230,7 +245,6 @@ def inject_style():
         /* 指標カード（市場ダッシュボード） */
         div[data-testid="stMetric"] {
             background: #ffffff;
-
             border-radius: 14px;
             padding: 14px 16px 10px 16px;
             box-shadow: 0 1px 4px rgba(20, 20, 30, 0.06);
@@ -316,6 +330,12 @@ def inject_style():
             background: #fdecec;
             color: #c0392b;
             margin-left: 6px;
+        }
+        .stock-card .badge-spec {
+            background: #fff1cc;
+            color: #8a5a00;
+            margin-left: 6px;
+            animation: fadeInUp 0.4s ease;
         }
         .stock-card .fundamentals-row {
             margin-top: 10px;
@@ -463,6 +483,72 @@ def compute_liquidity(hist: pd.DataFrame, window: int = 20):
     avg_volume = float(recent["Volume"].mean())
     avg_value = float((recent["Volume"] * recent["Close"]).mean())
     return avg_volume, avg_value
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def detect_speculative_signal(code: str):
+    """出来高急増・短期急騰急落を検知し、「仕手株」的な値動きの可能性があるかを判定する。
+    あくまで統計的な目安であり、決算・材料公表など正当な理由による値動きも含まれるため、
+    断定的な判断はできない点に注意（呼び出し側でその旨を必ず案内すること）。
+    戻り値: (シグナルの有無: bool, 理由の説明文: str または None)"""
+    end = dt.date.today()
+    start = end - dt.timedelta(days=60)
+    try:
+        hist = fetch_history(code, start, end)
+    except Exception:
+        return False, None
+    if hist is None or hist.empty or "Volume" not in hist.columns or "Close" not in hist.columns:
+        return False, None
+    hist = hist.sort_index().dropna(subset=["Volume", "Close"])
+    if len(hist) < 2:
+        return False, None
+
+    reasons = []
+
+    # 出来高急増: 直近1日の出来高が、それ以前の平均出来高の一定倍率以上
+    prior_volume = hist["Volume"].iloc[-21:-1] if len(hist) >= 21 else hist["Volume"].iloc[:-1]
+    if not prior_volume.empty and prior_volume.mean() > 0:
+        latest_volume = hist["Volume"].iloc[-1]
+        spike_ratio = latest_volume / prior_volume.mean()
+        if spike_ratio >= SPEC_VOLUME_SPIKE_RATIO:
+            reasons.append(f"出来高が直近平均の{spike_ratio:.1f}倍に急増")
+
+    # 短期急騰・急落: 直近1営業日の値動き
+    c_prev, c_last = hist["Close"].iloc[-2], hist["Close"].iloc[-1]
+    if c_prev and c_prev > 0:
+        day_pct = (c_last - c_prev) / c_prev * 100
+        if abs(day_pct) >= SPEC_DAY_PCT_THRESHOLD:
+            reasons.append(f"直近1営業日で{day_pct:+.1f}%の値動き")
+
+    # 短期急騰・急落: 直近5営業日の値動き
+    if len(hist) >= 6:
+        c0, c1 = hist["Close"].iloc[-6], hist["Close"].iloc[-1]
+        if c0 and c0 > 0:
+            week_pct = (c1 - c0) / c0 * 100
+            if abs(week_pct) >= SPEC_WEEK_PCT_THRESHOLD:
+                reasons.append(f"直近5営業日で{week_pct:+.1f}%の値動き")
+
+    if reasons:
+        return True, "・".join(reasons)
+    return False, None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_52w_range(code: str):
+    """過去52週間（約1年）の高値・安値を取得する。取得できない場合は (None, None)。"""
+    end = dt.date.today()
+    start = end - dt.timedelta(days=365)
+    try:
+        hist = fetch_history(code, start, end)
+    except Exception:
+        return None, None
+    if hist is None or hist.empty or "High" not in hist.columns or "Low" not in hist.columns:
+        return None, None
+    high = hist["High"].max()
+    low = hist["Low"].min()
+    if pd.isna(high) or pd.isna(low):
+        return None, None
+    return float(high), float(low)
 
 
 def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
@@ -1107,6 +1193,7 @@ with st.spinner("株価データを取得中です…"):
         earnings_dates = fetch_earnings_dates(code)
         fundamentals = fetch_fundamentals(code)
         avg_volume, avg_value = compute_liquidity(hist)
+        is_spec, spec_reason = detect_speculative_signal(code)
         rows.append(
             {
                 "code": code,
@@ -1123,6 +1210,8 @@ with st.spinner("株価データを取得中です…"):
                 "avg_volume": avg_volume,
                 "avg_value": avg_value,
                 "is_thin": (avg_value is not None) and (avg_value < LIQUIDITY_THIN_THRESHOLD),
+                "is_spec": is_spec,
+                "spec_reason": spec_reason,
             }
         )
 
@@ -1135,7 +1224,7 @@ with tab1:
     st.caption(f"「{selected_sector}」・直近{period_choice}のトータル騰落率")
 
     with st.expander("🔎 絞り込み条件（スクリーニング）"):
-        f1, f2, f3 = st.columns(3)
+        f1, f2 = st.columns(2)
         with f1:
             per_max = st.number_input(
                 "PER 上限（倍）", min_value=0.0, value=0.0, step=1.0,
@@ -1146,12 +1235,20 @@ with tab1:
                 "配当利回り 下限（%）", min_value=0.0, value=0.0, step=0.1,
                 help=glossary_help("配当利回り") + "\n\n0のときは絞り込みません。",
             )
+        f3, f4 = st.columns(2)
         with f3:
             exclude_thin = st.checkbox(
                 "薄商い銘柄を除外する",
                 value=False,
                 help=glossary_help("出来高")
                 + f"\n\n平均売買代金が{LIQUIDITY_THIN_THRESHOLD:,}円/日を下回る銘柄を一覧から除外します。",
+            )
+        with f4:
+            exclude_spec = st.checkbox(
+                "値動き急変の銘柄を除外する",
+                value=False,
+                help=glossary_help("値動き急変")
+                + "\n\n出来高急増や短期の急な値動きが検知された銘柄を一覧から除外します。",
             )
 
     filtered_df = result_df.copy()
@@ -1165,6 +1262,8 @@ with tab1:
         filtered_df = filtered_df[filtered_df["dividend_yield"].apply(lambda v: (_dy_pct(v) or -1) >= dy_min)]
     if exclude_thin:
         filtered_df = filtered_df[~filtered_df["is_thin"].fillna(False)]
+    if exclude_spec:
+        filtered_df = filtered_df[~filtered_df["is_spec"].fillna(False)]
 
     if filtered_df.empty:
         st.warning("絞り込み条件に一致する銘柄がありませんでした。条件を緩めてみてください。")
@@ -1195,6 +1294,12 @@ with tab1:
             if r["is_thin"]
             else ""
         )
+        spec_tooltip = f"{r['spec_reason']}。{GLOSSARY['値動き急変']}" if r["is_spec"] else ""
+        spec_badge = (
+            f'<span class="badge badge-spec" title="{spec_tooltip}">🚨 値動き急変</span>'
+            if r["is_spec"]
+            else ""
+        )
 
         render_html(
             f"""
@@ -1210,6 +1315,7 @@ with tab1:
                         <div class="pct" style="color:{color};">{arrow} {pct_text}</div>
                         <span class="{badge_class}">🗓 {badge_text}</span>
                         {thin_badge}
+                        {spec_badge}
                     </div>
                 </div>
                 <div class="fundamentals-row">
@@ -1231,7 +1337,7 @@ with tab2:
     st.caption(f"🔗 詳しく調べる → [Yahoo!ファイナンスで{focus_name}を見る](https://finance.yahoo.co.jp/quote/{focus_code}.T)")
 
     focus_fundamentals = fetch_fundamentals(focus_code)
-    fc1, fc2, fc3, fc4 = st.columns(4)
+    fc1, fc2, fc3, fc4, fc5 = st.columns(5)
     with fc1:
         st.metric("PER", format_ratio(focus_fundamentals.get("per")), help=glossary_help("PER"))
     with fc2:
@@ -1244,6 +1350,30 @@ with tab2:
         )
     with fc4:
         st.metric("時価総額", format_market_cap(focus_fundamentals.get("market_cap")), help=glossary_help("時価総額"))
+    with fc5:
+        high_52w, low_52w = fetch_52w_range(focus_code)
+        if high_52w is not None and low_52w is not None and high_52w > low_52w:
+            latest_close_for_range = get_latest_price(focus_code)
+            if latest_close_for_range is not None:
+                position_pct = (latest_close_for_range - low_52w) / (high_52w - low_52w) * 100
+                range_value = f"位置 {position_pct:.0f}%"
+            else:
+                range_value = "―"
+            st.metric(
+                "52週レンジ",
+                range_value,
+                help=glossary_help("52週レンジ") + f"\n\n52週高値: {high_52w:,.1f}円 ／ 52週安値: {low_52w:,.1f}円",
+            )
+        else:
+            st.metric("52週レンジ", "―", help=glossary_help("52週レンジ"))
+
+    is_spec_focus, spec_reason_focus = detect_speculative_signal(focus_code)
+    if is_spec_focus:
+        st.warning(
+            f"🚨 この銘柄は値動きが急変している可能性があります（{spec_reason_focus}）。"
+            "決算・材料公表など正当な理由による場合もありますが、仕手株的な値動きの可能性も否定できません。"
+            "値動きが荒く損失リスクも大きいため、投資判断は慎重に行ってください。"
+        )
 
     chart_days = st.select_slider(
         "表示期間",
