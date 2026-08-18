@@ -900,12 +900,15 @@ with tab1:
     for _, r in result_df.iterrows():
         color = pct_color(r["pct"])
         arrow = pct_arrow(r["pct"])
-        pct_text = f"{r['pct']:+.2f}%" if r["pct"] is not None else "取得できません"
+        pct_text = f"{r['pct']:+.2f}%" if pd.notna(r["pct"]) else "取得できません"
         price_text = (
-            f"{r['base_p']:.1f}円 → {r['latest_p']:.1f}円" if r["base_p"] is not None else ""
+            f"{r['base_p']:.1f}円 → {r['latest_p']:.1f}円" if pd.notna(r["base_p"]) else ""
         )
-        badge_class = "badge" if r["earnings"] else "badge badge-none"
-        badge_text = r["earnings"] if r["earnings"] else "決算情報なし"
+        # 全銘柄で決算日が取得できなかった場合、DataFrame化の際にこの列がfloat型のNaNに
+        # 変換されてしまうことがある（NaNはPythonのbool判定でTrueになるため、
+        # 素朴な if r["earnings"] だと「nan」という文字列がそのまま表示されてしまう）
+        badge_class = "badge" if pd.notna(r["earnings"]) else "badge badge-none"
+        badge_text = r["earnings"] if pd.notna(r["earnings"]) else "決算情報なし"
         yahoo_url = f"https://finance.yahoo.co.jp/quote/{r['code']}.T"
 
         st.markdown(
