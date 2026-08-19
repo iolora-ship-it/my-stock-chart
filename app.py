@@ -18,9 +18,9 @@
   - 決算発表日をカード・カレンダー表の両方で確認できる
   - PER・PBR・配当利回り・時価総額などのファンダメンタルズ指標を表示
   - 出来高から「薄商い」銘柄を検知し、データの信頼度が低い可能性を注意表示
-  - 出来高急増・急な値動きを検知し、仕手株的な動きの可能性がある銘柄に注意アイコンを表示
+  - 出来高急増・急な値動きを検知し、薄商いでの仕手株疑い（注意）と、出来高を伴う値動き（注目）を区別して表示
   - 個別チャートに52週高値・安値からの位置を表示
-  - PER上限・配当利回り下限・薄商い除外・値動き急変除外でのスクリーニング（絞り込み）
+  - PER上限・配当利回り下限・薄商い除外・仕手株疑い除外でのスクリーニング（絞り込み）
   - 保有銘柄・株数・取得単価を登録できるポートフォリオ機能（評価額・含み損益を表示）
   - 専門用語（PER・PBR・RSIなど）にはカーソルを合わせると説明が出るツールチップ＋用語集
 """
@@ -63,12 +63,17 @@ GLOSSARY = {
     "出来高": "一定期間内に売買が成立した株数（または金額）です。出来高が少ない「薄商い」の銘柄は、株価データが実勢を反映しにくく、急な値動きが出やすい傾向があります。",
     "移動平均線": "一定期間（例: 25日・75日）の終値の平均値を結んだ線です。株価そのものより滑らかに動くため、上昇・下降トレンドの方向性を把握するのに使われます。",
     "RSI": "相対力指数（Relative Strength Index）。一定期間の値上がり幅と値下がり幅の比率から算出される、0〜100で表されるテクニカル指標です。一般に70以上で「買われすぎ」、30以下で「売られすぎ」の目安とされますが、あくまで参考値です。",
-    "値動き急変": (
-        "出来高が普段の数倍に急増していたり、短期間で株価が大きく変動している状態です。"
-        "決算や材料の公表など正当な理由による場合もありますが、特定の投資家グループによる"
-        "相場操縦（いわゆる「仕手株」）的な値動きの可能性も否定できません。"
-        "このバッジは統計的な目安に過ぎず、断定的な判断ではない点にご注意ください。"
-        "値動きが荒く損失リスクも大きいため、投資判断は慎重に行ってください。"
+    "仕手株疑い": (
+        "普段の売買代金が少ない「薄商い」の銘柄で、出来高が急増したり株価が短期間で大きく変動したりしている状態です。"
+        "取引参加者が少ないため、少数の投資家グループでも株価を動かしやすく、"
+        "相場操縦（いわゆる「仕手株」）的な値動きに巻き込まれるリスクが相対的に高いと考えられます。"
+        "統計的な目安に過ぎず断定的な判断ではありませんが、値動きが荒く損失リスクも大きいため、投資判断は特に慎重に行ってください。"
+    ),
+    "出来高急増（注目）": (
+        "普段からある程度の売買代金がある銘柄で、出来高が急増し株価が大きく動いている状態です。"
+        "決算発表や好材料のニュースなど、何らかの材料をきっかけに市場の関心が高まっている可能性があります。"
+        "薄商いの銘柄が急変する場合に比べると、相対的に多くの参加者に支持された動きである可能性が高いですが、"
+        "値動きが大きいこと自体に変わりはないため、飛びつく前に材料や需給を確認することをおすすめします。"
     ),
     "52週レンジ": "過去52週間（約1年間）の最高値・最安値です。現在値がそのレンジのどのあたりに位置するかで、直近の相対的な高値圏・安値圏を把握する目安になります。",
 }
@@ -337,6 +342,12 @@ def inject_style():
             margin-left: 6px;
             animation: fadeInUp 0.4s ease;
         }
+        .stock-card .badge-attention {
+            background: #e7f0ff;
+            color: #1552b5;
+            margin-left: 6px;
+            animation: fadeInUp 0.4s ease;
+        }
         .stock-card .fundamentals-row {
             margin-top: 10px;
             padding-top: 10px;
@@ -487,26 +498,36 @@ def compute_liquidity(hist: pd.DataFrame, window: int = 20):
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def detect_speculative_signal(code: str):
-    """出来高急増・短期急騰急落を検知し、「仕手株」的な値動きの可能性があるかを判定する。
-    あくまで統計的な目安であり、決算・材料公表など正当な理由による値動きも含まれるため、
-    断定的な判断はできない点に注意（呼び出し側でその旨を必ず案内すること）。
-    戻り値: (シグナルの有無: bool, 理由の説明文: str または None)"""
+    """出来高急増・短期急騰急落を検知し、その性質を「薄商いでの急変（仕手株疑い）」と
+    「出来高を伴う急変（注目＝決算・好材料などによる健全な値動きの可能性）」に区別する。
+
+    区別の考え方: 急変が起きる直前（スパイク当日を含めない期間）の平均売買代金が
+    LIQUIDITY_THIN_THRESHOLD を下回っていれば、もともと参加者が少ない薄商いの銘柄と判断し、
+    少数の投資家でも値を動かしやすい＝仕手株的なリスクが相対的に高いとみなす。
+    逆に普段からある程度の売買代金がある銘柄の急変は、決算・材料公表など何らかのきっかけで
+    多くの参加者の関心が集まっている可能性が高いため、警告ではなく「注目」として扱う。
+
+    あくまで統計的な目安であり、断定的な判断ではない点に注意（呼び出し側でその旨を必ず案内すること）。
+    戻り値: (level, reason)
+      level: "warning"（薄商い×急変）, "attention"（出来高を伴う急変）, None（該当なし）
+      reason: 判定理由の説明文（str）または None"""
     end = dt.date.today()
     start = end - dt.timedelta(days=60)
     try:
         hist = fetch_history(code, start, end)
     except Exception:
-        return False, None
+        return None, None
     if hist is None or hist.empty or "Volume" not in hist.columns or "Close" not in hist.columns:
-        return False, None
+        return None, None
     hist = hist.sort_index().dropna(subset=["Volume", "Close"])
     if len(hist) < 2:
-        return False, None
+        return None, None
 
     reasons = []
 
     # 出来高急増: 直近1日の出来高が、それ以前の平均出来高の一定倍率以上
     prior_volume = hist["Volume"].iloc[-21:-1] if len(hist) >= 21 else hist["Volume"].iloc[:-1]
+    prior_close = hist["Close"].iloc[-21:-1] if len(hist) >= 21 else hist["Close"].iloc[:-1]
     if not prior_volume.empty and prior_volume.mean() > 0:
         latest_volume = hist["Volume"].iloc[-1]
         spike_ratio = latest_volume / prior_volume.mean()
@@ -528,9 +549,19 @@ def detect_speculative_signal(code: str):
             if abs(week_pct) >= SPEC_WEEK_PCT_THRESHOLD:
                 reasons.append(f"直近5営業日で{week_pct:+.1f}%の値動き")
 
-    if reasons:
-        return True, "・".join(reasons)
-    return False, None
+    if not reasons:
+        return None, None
+
+    # 急変が起きる「前」の売買代金で薄商いかどうかを判定する
+    # （急増した出来高そのものを含めると、薄商いの銘柄でも一時的に「厚く」見えてしまうため）
+    baseline_value = None
+    if not prior_volume.empty and not prior_close.empty:
+        baseline_value = float((prior_volume * prior_close).mean())
+    is_thin_baseline = baseline_value is not None and baseline_value < LIQUIDITY_THIN_THRESHOLD
+
+    reason_text = "・".join(reasons)
+    level = "warning" if is_thin_baseline else "attention"
+    return level, reason_text
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1193,7 +1224,7 @@ with st.spinner("株価データを取得中です…"):
         earnings_dates = fetch_earnings_dates(code)
         fundamentals = fetch_fundamentals(code)
         avg_volume, avg_value = compute_liquidity(hist)
-        is_spec, spec_reason = detect_speculative_signal(code)
+        spec_level, spec_reason = detect_speculative_signal(code)
         rows.append(
             {
                 "code": code,
@@ -1210,7 +1241,7 @@ with st.spinner("株価データを取得中です…"):
                 "avg_volume": avg_volume,
                 "avg_value": avg_value,
                 "is_thin": (avg_value is not None) and (avg_value < LIQUIDITY_THIN_THRESHOLD),
-                "is_spec": is_spec,
+                "spec_level": spec_level,
                 "spec_reason": spec_reason,
             }
         )
@@ -1245,10 +1276,11 @@ with tab1:
             )
         with f4:
             exclude_spec = st.checkbox(
-                "値動き急変の銘柄を除外する",
+                "仕手株疑いの銘柄を除外する",
                 value=False,
-                help=glossary_help("値動き急変")
-                + "\n\n出来高急増や短期の急な値動きが検知された銘柄を一覧から除外します。",
+                help=glossary_help("仕手株疑い")
+                + "\n\n薄商いの状態で出来高急増や急な値動きが検知された銘柄を一覧から除外します。"
+                "出来高を伴う値動き（注目バッジ）は対象外です。",
             )
 
     filtered_df = result_df.copy()
@@ -1263,7 +1295,7 @@ with tab1:
     if exclude_thin:
         filtered_df = filtered_df[~filtered_df["is_thin"].fillna(False)]
     if exclude_spec:
-        filtered_df = filtered_df[~filtered_df["is_spec"].fillna(False)]
+        filtered_df = filtered_df[filtered_df["spec_level"] != "warning"]
 
     if filtered_df.empty:
         st.warning("絞り込み条件に一致する銘柄がありませんでした。条件を緩めてみてください。")
@@ -1294,12 +1326,14 @@ with tab1:
             if r["is_thin"]
             else ""
         )
-        spec_tooltip = f"{r['spec_reason']}。{GLOSSARY['値動き急変']}" if r["is_spec"] else ""
-        spec_badge = (
-            f'<span class="badge badge-spec" title="{spec_tooltip}">🚨 値動き急変</span>'
-            if r["is_spec"]
-            else ""
-        )
+        if r["spec_level"] == "warning":
+            spec_tooltip = f"{r['spec_reason']}。{GLOSSARY['仕手株疑い']}"
+            spec_badge = f'<span class="badge badge-spec" title="{spec_tooltip}">🚨 仕手株疑い</span>'
+        elif r["spec_level"] == "attention":
+            spec_tooltip = f"{r['spec_reason']}。{GLOSSARY['出来高急増（注目）']}"
+            spec_badge = f'<span class="badge badge-attention" title="{spec_tooltip}">👀 注目</span>'
+        else:
+            spec_badge = ""
 
         render_html(
             f"""
@@ -1367,12 +1401,18 @@ with tab2:
         else:
             st.metric("52週レンジ", "―", help=glossary_help("52週レンジ"))
 
-    is_spec_focus, spec_reason_focus = detect_speculative_signal(focus_code)
-    if is_spec_focus:
+    spec_level_focus, spec_reason_focus = detect_speculative_signal(focus_code)
+    if spec_level_focus == "warning":
         st.warning(
-            f"🚨 この銘柄は値動きが急変している可能性があります（{spec_reason_focus}）。"
-            "決算・材料公表など正当な理由による場合もありますが、仕手株的な値動きの可能性も否定できません。"
-            "値動きが荒く損失リスクも大きいため、投資判断は慎重に行ってください。"
+            f"🚨 この銘柄は薄商いの状態で値動きが急変している可能性があります（{spec_reason_focus}）。"
+            "参加者が少ないため、少数の投資家グループでも株価を動かしやすく、仕手株的な値動きに巻き込まれるリスクが相対的に高いと考えられます。"
+            "値動きが荒く損失リスクも大きいため、投資判断は特に慎重に行ってください。"
+        )
+    elif spec_level_focus == "attention":
+        st.info(
+            f"👀 この銘柄は出来高を伴って値動きが急変しています（{spec_reason_focus}）。"
+            "決算発表や好材料のニュースなど、何らかの材料で市場の関心が高まっている可能性があります。"
+            "値動きが大きいこと自体に変わりはないため、材料や需給を確認したうえでご検討ください。"
         )
 
     chart_days = st.select_slider(
