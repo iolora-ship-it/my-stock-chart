@@ -20,8 +20,11 @@
   - 出来高から「薄商い」銘柄を検知し、データの信頼度が低い可能性を注意表示
   - 出来高急増・急な値動きを検知し、薄商いでの仕手株疑い（注意）と、出来高を伴う値動き（注目）を区別して表示
   - 個別チャートに52週高値・安値からの位置を表示
-  - PER上限・配当利回り下限・薄商い除外・仕手株疑い除外でのスクリーニング（絞り込み）
+  - PER上限・配当利回り下限・薄商い除外・仕手株疑い除外・購入予算・だまし初動除外でのスクリーニング（絞り込み）
+  - 5日/25日/75日移動平均線のパーフェクトオーダーと25日線乖離率から「トレンド確立度」を判定・表示
+  - 陽線/陰線・出来高・終値位置・5日移動平均線から「初動の信頼度（だまし判定）」を判定・表示
   - 保有銘柄・株数・取得単価を登録できるポートフォリオ機能（評価額・含み損益を表示）
+  - TOPIX・NYダウ・WTI原油やセクター別騰落ランキングをまとめて確認できる「市場概況」タブ
   - 専門用語（PER・PBR・RSIなど）にはカーソルを合わせると説明が出るツールチップ＋用語集
 """
 
@@ -54,6 +57,16 @@ SPEC_VOLUME_SPIKE_RATIO = 3.0   # 直近の出来高が、それ以前の平均�
 SPEC_DAY_PCT_THRESHOLD = 15.0   # 直近1営業日の値動きが何%以上で急変とみなすか
 SPEC_WEEK_PCT_THRESHOLD = 30.0  # 直近5営業日の値動きが何%以上で急変とみなすか
 
+# 「トレンド確立度」判定基準（MA5/MA25/MA75のパーフェクトオーダー＋25日線からの乖離率）
+TREND_EXTENDED_DEV_THRESHOLD = 15.0  # 25日線からの乖離率がこれ以上だと「伸びすぎ」の注記を出す
+
+# 「初動の信頼度（だまし判定）」の基準
+ENTRY_VOLUME_RATIO_THRESHOLD = 1.2   # 出来高が直近5日平均の何倍以上あれば「出来高を伴う」とみなすか
+ENTRY_CLOSE_POS_THRESHOLD = 0.6      # 終値がその日の値幅の上位何割以内にあれば「強い引け」とみなすか（0〜1）
+
+# 100株単位で購入する場合の1単元あたり株数
+SHARE_UNIT = 100
+
 # 用語集（カード上のツールチップ・用語集エキスパンダーの両方で使う）
 GLOSSARY = {
     "PER": "株価収益率（Price Earnings Ratio）。株価が1株当たり利益(EPS)の何倍かを示す指標です。数値が低いほど利益に対して株価が割安と判断されることが多いですが、業種によって適正水準は異なります。",
@@ -76,6 +89,22 @@ GLOSSARY = {
         "値動きが大きいこと自体に変わりはないため、飛びつく前に材料や需給を確認することをおすすめします。"
     ),
     "52週レンジ": "過去52週間（約1年間）の最高値・最安値です。現在値がそのレンジのどのあたりに位置するかで、直近の相対的な高値圏・安値圏を把握する目安になります。",
+    "トレンド確立度": (
+        "5日・25日・75日移動平均線の並び順（短期>中期>長期＝パーフェクトオーダー）で、"
+        "上昇トレンドがどれだけ「確立」しているかを判定します。"
+        "パーフェクトオーダーでない場合は、まだ底値圏からの反発を試している段階（トレンド未確立）である可能性があります。"
+        "底値を正確に当てるのは難しいため、トレンドが確立してから乗る方が再現性が高いとされます。"
+    ),
+    "25日線乖離率": (
+        "現在の株価が25日移動平均線からどれだけ離れているかを示す割合です。"
+        "プラスが大きいほど短期的に「伸びすぎ」ており、平均線に向けて戻される（反落する）リスクが相対的に高まる目安になります。"
+    ),
+    "初動の信頼度": (
+        "直近1日の値動きが「本物の初動」か「だまし」かを、陽線/陰線・出来高（直近5日平均比）・"
+        "終値が値幅のどこにあるか（強い引けか弱い引けか）・5日移動平均線より上かどうかから機械的に判定します。"
+        "出来高を伴わない上昇や、値幅の下の方で引けた上昇は、翌日以降に反落する「だまし」の可能性が相対的に高いとされます。"
+        "あくまで直近1日のパターンによる目安であり、材料の有無などは別途ご確認ください。"
+    ),
 }
 
 
@@ -138,6 +167,30 @@ MARKET_INDICATORS = [
         "unit": "%",
         "decimals": 2,
         "help": "米国財務省が発行する10年物国債の利回り。世界の金利・株式市場に影響する重要指標です。上昇は株価にマイナスに働きやすいとされます。",
+    },
+]
+
+MARKET_INDICATORS_EXTRA = [
+    {
+        "ticker": "1306.T",
+        "label": "TOPIX（ETF）",
+        "unit": "円",
+        "decimals": 1,
+        "help": "東証株価指数(TOPIX)に連動するETF(1306)の価格。日経平均が値がさ株に影響されやすいのに対し、TOPIXは東証プライム全銘柄の時価総額加重平均に近く、市場全体の実感に近いとされます。",
+    },
+    {
+        "ticker": "^DJI",
+        "label": "NYダウ",
+        "unit": "ドル",
+        "decimals": 0,
+        "help": "ニューヨークダウ工業株30種平均。米国株市場の代表指数で、前日の米国市場の値が表示されます。日本株は米国株の流れを引き継ぎやすい傾向があります。",
+    },
+    {
+        "ticker": "CL=F",
+        "label": "WTI原油先物",
+        "unit": "ドル",
+        "decimals": 2,
+        "help": "米国産WTI原油の先物価格。資源・エネルギー関連株や、インフレ動向を通じて幅広い銘柄に影響します。",
     },
 ]
 
@@ -347,6 +400,26 @@ def inject_style():
             color: #1552b5;
             margin-left: 6px;
             animation: fadeInUp 0.4s ease;
+        }
+        .stock-card .badge-trend-ok {
+            background: #e8f8ee;
+            color: #14804a;
+            margin-left: 6px;
+        }
+        .stock-card .badge-trend-none {
+            background: #f1f2f4;
+            color: #9aa0a6;
+            margin-left: 6px;
+        }
+        .stock-card .badge-entry-good {
+            background: #e8f8ee;
+            color: #14804a;
+            margin-left: 6px;
+        }
+        .stock-card .badge-entry-bad {
+            background: #fdecec;
+            color: #c0392b;
+            margin-left: 6px;
         }
         .stock-card .fundamentals-row {
             margin-top: 10px;
@@ -580,6 +653,115 @@ def fetch_52w_range(code: str):
     if pd.isna(high) or pd.isna(low):
         return None, None
     return float(high), float(low)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def compute_trend_status(code: str):
+    """MA5・MA25・MA75の並び順（パーフェクトオーダー）と25日線からの乖離率・25日線の傾きから、
+    上昇トレンドが「確立」しているか、まだ底値圏からの反発を試している段階（未確立）かを判定する。
+
+    戻り値: dict または None（データ不足で判定できない場合）
+      structure: "perfect_order"（短期>中期>長期＝上昇トレンド確立） / "below"（それ以外＝未確立）
+      dev25: 25日線からの乖離率(%)
+      ma25_slope10: 直近10営業日での25日線自体の変化率(%)（プラス＝25日線自体が上向き）
+      extended: 乖離率が伸びすぎ水準（TREND_EXTENDED_DEV_THRESHOLD）を超えているか
+    """
+    end = dt.date.today()
+    start = end - dt.timedelta(days=200)
+    try:
+        hist = fetch_history(code, start, end)
+    except Exception:
+        return None
+    if hist is None or hist.empty or "Close" not in hist.columns:
+        return None
+    closes = hist["Close"].dropna()
+    if len(closes) < 35:
+        return None
+
+    def _ma(period, end_offset):
+        idx_end = len(closes) - end_offset
+        window = closes.iloc[max(0, idx_end - period):idx_end]
+        if len(window) < period:
+            return None
+        return float(window.mean())
+
+    price = float(closes.iloc[-1])
+    ma5 = _ma(5, 0)
+    ma25 = _ma(25, 0)
+    ma75 = _ma(75, 0)
+    ma25_10d_ago = _ma(25, 10)
+    if ma5 is None or ma25 is None:
+        return None
+    structure = "perfect_order" if (ma5 > ma25 and (ma75 is None or ma25 > ma75)) else "below"
+    dev25 = (price - ma25) / ma25 * 100 if ma25 else None
+    ma25_slope10 = (
+        (ma25 - ma25_10d_ago) / ma25_10d_ago * 100
+        if (ma25_10d_ago is not None and ma25_10d_ago != 0)
+        else None
+    )
+    extended = dev25 is not None and dev25 >= TREND_EXTENDED_DEV_THRESHOLD
+    return {
+        "structure": structure,
+        "dev25": dev25,
+        "ma25_slope10": ma25_slope10,
+        "extended": extended,
+    }
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def compute_entry_quality(code: str):
+    """直近1営業日の値動きが「本物の初動」か「だまし」かを判定する。
+    陽線/陰線・出来高（直近5営業日平均比）・終値の値幅内位置・5日移動平均線との位置関係から機械的に判定する。
+
+    戻り値: dict または None（データ不足・陰線で判定対象外の場合）
+      bullish: 陽線かどうか
+      vol_ratio: 出来高の直近5営業日平均比
+      close_pos: 終値がその日の値幅のどこにあるか（0=安値、1=高値）
+      above_ma5: 終値が5日移動平均線より上かどうか
+      reliable: 陽線かつ出来高・終値位置・MA5の3条件を満たすか（True=信頼度が高い初動、False=だましの可能性）
+    """
+    end = dt.date.today()
+    start = end - dt.timedelta(days=60)
+    try:
+        hist = fetch_history(code, start, end)
+    except Exception:
+        return None
+    if hist is None or hist.empty:
+        return None
+    needed = {"Open", "High", "Low", "Close", "Volume"}
+    if not needed.issubset(hist.columns):
+        return None
+    hist = hist.dropna(subset=list(needed)).sort_index()
+    if len(hist) < 7:
+        return None
+
+    last = hist.iloc[-1]
+    o, h, l, c, v = last["Open"], last["High"], last["Low"], last["Close"], last["Volume"]
+    bullish = c >= o
+
+    prior_vol = hist["Volume"].iloc[-6:-1]
+    vol_ratio = float(v / prior_vol.mean()) if prior_vol.mean() > 0 else None
+
+    close_pos = float((c - l) / (h - l)) if h > l else 1.0
+
+    ma5_closes = hist["Close"].iloc[-6:-1]
+    above_ma5 = bool(c > ma5_closes.mean()) if len(ma5_closes) == 5 else None
+
+    reliable = None
+    if bullish:
+        reliable = (
+            vol_ratio is not None and vol_ratio >= ENTRY_VOLUME_RATIO_THRESHOLD
+            and close_pos >= ENTRY_CLOSE_POS_THRESHOLD
+            and bool(above_ma5)
+        )
+
+    return {
+        "bullish": bool(bullish),
+        "vol_ratio": vol_ratio,
+        "close_pos": close_pos,
+        "above_ma5": above_ma5,
+        "reliable": reliable,
+    }
 
 
 def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
@@ -1225,6 +1407,8 @@ with st.spinner("株価データを取得中です…"):
         fundamentals = fetch_fundamentals(code)
         avg_volume, avg_value = compute_liquidity(hist)
         spec_level, spec_reason = detect_speculative_signal(code)
+        trend_status = compute_trend_status(code)
+        entry_quality = compute_entry_quality(code)
         rows.append(
             {
                 "code": code,
@@ -1243,12 +1427,16 @@ with st.spinner("株価データを取得中です…"):
                 "is_thin": (avg_value is not None) and (avg_value < LIQUIDITY_THIN_THRESHOLD),
                 "spec_level": spec_level,
                 "spec_reason": spec_reason,
+                "trend_status": trend_status,
+                "entry_quality": entry_quality,
             }
         )
 
 result_df = pd.DataFrame(rows).sort_values("pct", ascending=False, na_position="last")
 
-tab1, tab2, tab3, tab4 = st.tabs(["📊 セクター比較", "🕯️ 個別チャート", "🗓️ 決算カレンダー", "💼 ポートフォリオ"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["📊 セクター比較", "🕯️ 個別チャート", "🗓️ 決算カレンダー", "💼 ポートフォリオ", "🌍 市場概況"]
+)
 
 # --- タブ1: セクター比較 ---------------------------------------------------
 with tab1:
@@ -1282,6 +1470,21 @@ with tab1:
                 + "\n\n薄商いの状態で出来高急増や急な値動きが検知された銘柄を一覧から除外します。"
                 "出来高を伴う値動き（注目バッジ）は対象外です。",
             )
+        f5, f6 = st.columns(2)
+        with f5:
+            budget_max = st.number_input(
+                "購入予算 上限（円・100株単位）", min_value=0, value=0, step=10000,
+                help="入力した予算で100株（1単元）買える株価（予算÷100円）以下の銘柄だけに絞り込みます。"
+                "\n\n0のときは絞り込みません。",
+            )
+        with f6:
+            exclude_fake_start = st.checkbox(
+                "だまし初動（信頼度が低い上昇）を除外する",
+                value=False,
+                help=glossary_help("初動の信頼度")
+                + "\n\n直近1営業日が陽線でも、出来高・終値位置・5日移動平均線のいずれかの条件を満たさない銘柄を除外します。"
+                "陰線の銘柄や、上昇していない銘柄は対象外（除外されません）。",
+            )
 
     filtered_df = result_df.copy()
     if per_max > 0:
@@ -1296,6 +1499,13 @@ with tab1:
         filtered_df = filtered_df[~filtered_df["is_thin"].fillna(False)]
     if exclude_spec:
         filtered_df = filtered_df[filtered_df["spec_level"] != "warning"]
+    if budget_max > 0:
+        max_price = budget_max / SHARE_UNIT
+        filtered_df = filtered_df[filtered_df["latest_p"].apply(lambda v: pd.notna(v) and v <= max_price)]
+    if exclude_fake_start:
+        def _is_fake_start(eq):
+            return isinstance(eq, dict) and eq.get("bullish") and eq.get("reliable") is False
+        filtered_df = filtered_df[~filtered_df["entry_quality"].apply(_is_fake_start)]
 
     if filtered_df.empty:
         st.warning("絞り込み条件に一致する銘柄がありませんでした。条件を緩めてみてください。")
@@ -1335,6 +1545,25 @@ with tab1:
         else:
             spec_badge = ""
 
+        trend = r["trend_status"]
+        if trend and trend.get("structure") == "perfect_order":
+            dev_txt = f"{trend['dev25']:+.1f}%" if trend.get("dev25") is not None else "―"
+            extended_note = "（伸びすぎ注意）" if trend.get("extended") else ""
+            trend_tooltip = f"25日線乖離率 {dev_txt}{extended_note}。{GLOSSARY['トレンド確立度']}"
+            trend_badge = f'<span class="badge badge-trend-ok" title="{trend_tooltip}">📈 トレンド確立 {dev_txt}</span>'
+        elif trend:
+            trend_badge = f'<span class="badge badge-trend-none" title="{GLOSSARY["トレンド確立度"]}">🌱 未確立</span>'
+        else:
+            trend_badge = ""
+
+        eq = r["entry_quality"]
+        if eq and eq.get("bullish") and eq.get("reliable") is True:
+            entry_badge = f'<span class="badge badge-entry-good" title="{GLOSSARY["初動の信頼度"]}">✅ 出来高を伴う陽線</span>'
+        elif eq and eq.get("bullish") and eq.get("reliable") is False:
+            entry_badge = f'<span class="badge badge-entry-bad" title="{GLOSSARY["初動の信頼度"]}">⚠ だまし初動の可能性</span>'
+        else:
+            entry_badge = ""
+
         render_html(
             f"""
             <div class="stock-card">
@@ -1350,6 +1579,8 @@ with tab1:
                         <span class="{badge_class}">🗓 {badge_text}</span>
                         {thin_badge}
                         {spec_badge}
+                        {trend_badge}
+                        {entry_badge}
                     </div>
                 </div>
                 <div class="fundamentals-row">
@@ -1415,6 +1646,30 @@ with tab2:
             "値動きが大きいこと自体に変わりはないため、材料や需給を確認したうえでご検討ください。"
         )
 
+    trend_focus = compute_trend_status(focus_code)
+    entry_focus = compute_entry_quality(focus_code)
+    tc1, tc2 = st.columns(2)
+    with tc1:
+        if trend_focus:
+            if trend_focus.get("structure") == "perfect_order":
+                dev_txt = f"{trend_focus['dev25']:+.1f}%" if trend_focus.get("dev25") is not None else "―"
+                extended_note = "（伸びすぎ注意）" if trend_focus.get("extended") else ""
+                st.metric("トレンド確立度", f"📈 確立 {dev_txt}{extended_note}", help=glossary_help("トレンド確立度", "25日線乖離率"))
+            else:
+                st.metric("トレンド確立度", "🌱 未確立（反発初期の可能性）", help=glossary_help("トレンド確立度", "25日線乖離率"))
+        else:
+            st.metric("トレンド確立度", "―", help=glossary_help("トレンド確立度"))
+    with tc2:
+        if entry_focus and entry_focus.get("bullish"):
+            if entry_focus.get("reliable") is True:
+                st.metric("直近1日の初動の信頼度", "✅ 出来高を伴う陽線", help=glossary_help("初動の信頼度"))
+            elif entry_focus.get("reliable") is False:
+                st.metric("直近1日の初動の信頼度", "⚠ だましの可能性", help=glossary_help("初動の信頼度"))
+        elif entry_focus is not None:
+            st.metric("直近1日の初動の信頼度", "陰線（対象外）", help=glossary_help("初動の信頼度"))
+        else:
+            st.metric("直近1日の初動の信頼度", "―", help=glossary_help("初動の信頼度"))
+
     chart_days = st.select_slider(
         "表示期間",
         options=[10, 30, 60, 90, 180, 365, 730],
@@ -1433,6 +1688,7 @@ with tab2:
     hist_ext = fetch_history(focus_code, ma_buffer_start, today)
     if not hist_ext.empty:
         hist_ext = hist_ext.sort_index()
+        hist_ext["MA5"] = hist_ext["Close"].rolling(window=5, min_periods=5).mean()
         hist_ext["MA25"] = hist_ext["Close"].rolling(window=25, min_periods=25).mean()
         hist_ext["MA75"] = hist_ext["Close"].rolling(window=75, min_periods=75).mean()
         hist_ext["RSI14"] = compute_rsi(hist_ext["Close"], period=14)
@@ -1486,6 +1742,13 @@ with tab2:
         )
 
         if show_technical:
+            fig.add_trace(
+                go.Scatter(
+                    x=hist.index, y=hist["MA5"], mode="lines", name="5日移動平均線",
+                    line=dict(color="#14804a", width=1.1),
+                ),
+                row=1, col=1,
+            )
             fig.add_trace(
                 go.Scatter(
                     x=hist.index, y=hist["MA25"], mode="lines", name="25日移動平均線",
@@ -1787,3 +2050,51 @@ with tab4:
                     st.rerun()
 
     st.caption("⚠️ ポートフォリオ情報はアプリのサーバーに保存されます。今後アプリの機能追加・修正で更新すると、リセットされる場合があります。また、これは損益の目安表示であり、税金・手数料等は考慮していません。")
+
+# --- タブ5: 市場概況 ---------------------------------------------------
+with tab5:
+    st.caption(f"個別銘柄だけでなく、市場全体の空気を確認できます。期間「{period_choice}」でのトータル変化率です。")
+
+    st.markdown("#### 🌐 主要指標")
+    all_indicators = MARKET_INDICATORS + MARKET_INDICATORS_EXTRA
+    ext_cols = st.columns(len(all_indicators))
+    for col, ind in zip(ext_cols, all_indicators):
+        ind_hist = fetch_history(ind["ticker"], start_date, end_date, is_index=True)
+        pct, base_p, latest_p = pct_change_over_period(ind_hist, start_date, end_date)
+        with col:
+            if latest_p is not None:
+                st.metric(
+                    ind["label"],
+                    f"{latest_p:,.{ind['decimals']}f}{ind['unit']}",
+                    delta=f"{pct:+.2f}%" if pct is not None else None,
+                    help=ind["help"],
+                )
+            else:
+                st.metric(ind["label"], "取得できません", help=ind["help"])
+
+    st.markdown("")
+    st.info(
+        "💡 日経平均は構成225銘柄の「株価」を単純平均した指数のため、値がさ株（1株の値段が高い銘柄）の動きに"
+        "強く引きずられる傾向があります。TOPIXは時価総額加重平均で市場全体の実感に近いとされるため、"
+        "日経平均とTOPIXの向きが逆になっているときは、一部の値がさ株だけが相場を動かしている可能性を疑ってみてください。"
+    )
+
+    st.markdown("#### 🏭 セクター別 騰落ランキング（全業種）")
+    if sector_momentum.empty:
+        st.caption("セクターの勢いを取得できませんでした。")
+    else:
+        full_ranking = sector_momentum.sort_values("avg_pct", ascending=False).reset_index(drop=True)
+        up_n = int((full_ranking["avg_pct"] > 0).sum())
+        down_n = int((full_ranking["avg_pct"] < 0).sum())
+        flat_n = len(full_ranking) - up_n - down_n
+        bc1, bc2, bc3 = st.columns(3)
+        bc1.metric("上昇セクター数", f"{up_n} / {len(full_ranking)}")
+        bc2.metric("下落セクター数", f"{down_n} / {len(full_ranking)}")
+        bc3.metric("変わらず", f"{flat_n} / {len(full_ranking)}")
+        st.caption("各セクターの代表銘柄（数本）の平均騰落率をもとにした簡易ランキングです。個別銘柄の詳細は「📊 セクター比較」タブでご確認ください。")
+
+        display_ranking = full_ranking.rename(
+            columns={"sector": "セクター", "avg_pct": "平均騰落率(%)", "sample_n": "サンプル数"}
+        ).copy()
+        display_ranking["平均騰落率(%)"] = display_ranking["平均騰落率(%)"].map(lambda v: f"{v:+.2f}")
+        st.dataframe(display_ranking, use_container_width=True, hide_index=True)
