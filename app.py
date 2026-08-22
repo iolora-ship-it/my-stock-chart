@@ -13,7 +13,7 @@
   - stocks.csv に登録した銘柄をセクターごとに一覧・比較
   - サイドバー上部で銘柄名・証券コードを検索し、その場で一覧に追加できる
   - お気に入りグループを作成して、好きな銘柄をまとめて管理できる
-  - 1日〜1年まで細かく期間を指定してトータル騰落率(%)を表示
+  - 1日〜1年まで細かく期間を指定してトータルの騰落率(%)を表示
   - 大きなローソク足チャート（25日/75日移動平均線・出来高・RSIを併記）。クリックした地点の株価をピン留め表示
   - 決算発表日をカード・カレンダー表の両方で確認できる
   - PER・PBR・配当利回り・時価総額などのファンダメンタルズ指標を表示
@@ -92,6 +92,10 @@ GLOSSARY = {
     "トレンド確立度": (
         "5日・25日・75日移動平均線の並び順（短期>中期>長期＝パーフェクトオーダー）で、"
         "上昇トレンドがどれだけ「確立」しているかを判定します。"
+        "判定基準: 5日移動平均線 > 25日移動平均線 > 75日移動平均線 の順に並んでいれば「確立」、"
+        "そうでなければ「未確立」です（表示されている％の大小そのものが基準ではありません）。"
+        "「確立」の横に表示される％は25日移動平均線からの現在値のかい離率で、"
+        "目安として+15%以上になると短期的に伸びすぎている可能性が高いため「伸びすぎ注意」と併記されます。"
         "パーフェクトオーダーでない場合は、まだ底値圏からの反発を試している段階（トレンド未確立）である可能性があります。"
         "底値を正確に当てるのは難しいため、トレンドが確立してから乗る方が再現性が高いとされます。"
     ),
@@ -353,6 +357,13 @@ def inject_style():
         div[data-testid="stMetric"]:hover {
             transform: translateY(-3px);
             box-shadow: 0 10px 20px rgba(20, 20, 30, 0.10);
+        }
+        div[data-testid="stMetricValue"],
+        div[data-testid="stMetricValue"] * {
+            white-space: normal !important;
+            overflow: visible !important;
+            text-overflow: unset !important;
+            word-break: break-word !important;
         }
         div[data-testid="stMetricValue"] {
             font-weight: 800 !important;
@@ -1834,313 +1845,366 @@ with tab1:
 
 # --- タブ2: 個別チャート ---------------------------------------------------
 with tab2:
-    focus_label = st.selectbox("銘柄を選択", options=selected_labels)
-    focus_code = focus_label.split(" ")[0]
-    focus_name = master.loc[master["code"] == focus_code, "name"].values[0]
-    st.caption(f"🔗 詳しく調べる → [Yahoo!ファイナンスで{focus_name}を見る](https://finance.yahoo.co.jp/quote/{focus_code}.T)")
+    st.markdown("**銘柄一覧**（気になる銘柄の行をクリックすると、下に詳細が表示されます）")
+    st.caption(f"表示中: {len(selected_codes)}銘柄／サイドバーで銘柄を絞り込めます")
 
-    focus_fundamentals = fetch_fundamentals(focus_code)
-    fc1, fc2, fc3, fc4, fc5 = st.columns(5)
-    with fc1:
-        st.metric("PER", format_ratio(focus_fundamentals.get("per")), help=glossary_help("PER"))
-    with fc2:
-        st.metric("PBR", format_ratio(focus_fundamentals.get("pbr")), help=glossary_help("PBR"))
-    with fc3:
-        st.metric(
-            "配当利回り",
-            format_dividend_yield(focus_fundamentals.get("dividend_yield")),
-            help=glossary_help("配当利回り"),
+    def _trend_label(t):
+        if isinstance(t, dict) and t.get("structure") == "perfect_order":
+            return "📈 確立"
+        if isinstance(t, dict):
+            return "🌱 未確立"
+        return "―"
+
+    def _risk_label(level):
+        return {"warning": "🚨 仕手株疑い", "attention": "👀 注目"}.get(level, "")
+
+    def _pct_text_list(v):
+        return f"{v:+.2f}%" if pd.notna(v) else "―"
+
+    def _price_text_list(v):
+        return f"{v:,.1f}円" if pd.notna(v) else "―"
+
+    list_source = result_df[result_df["code"].isin(selected_codes)].reset_index(drop=True)
+
+    if "focus_code" not in st.session_state or st.session_state["focus_code"] not in selected_codes:
+        st.session_state["focus_code"] = selected_codes[0] if selected_codes else None
+
+    if selected_codes:
+        list_view = pd.DataFrame({
+            "コード": list_source["code"],
+            "銘柄名": list_source["name"],
+            "現在値": list_source["latest_p"].apply(_price_text_list),
+            "騰落率": list_source["pct"].apply(_pct_text_list),
+            "PER": list_source["per"].apply(format_ratio),
+            "PBR": list_source["pbr"].apply(format_ratio),
+            "トレンド": list_source["trend_status"].apply(_trend_label),
+            "注意": list_source["spec_level"].apply(_risk_label),
+        })
+        list_event = st.dataframe(
+            list_view,
+            use_container_width=True,
+            hide_index=True,
+            height=min(38 * (len(list_view) + 1) + 3, 350),
+            on_select="rerun",
+            selection_mode="single-row",
+            key="tab2_stock_list",
         )
-    with fc4:
-        st.metric("時価総額", format_market_cap(focus_fundamentals.get("market_cap")), help=glossary_help("時価総額"))
-    with fc5:
-        high_52w, low_52w = fetch_52w_range(focus_code)
-        if high_52w is not None and low_52w is not None and high_52w > low_52w:
-            latest_close_for_range = get_latest_price(focus_code)
-            if latest_close_for_range is not None:
-                position_pct = (latest_close_for_range - low_52w) / (high_52w - low_52w) * 100
-                range_value = f"位置 {position_pct:.0f}%"
-            else:
-                range_value = "―"
+        if list_event and list_event.selection and list_event.selection.get("rows"):
+            sel_pos = list_event.selection["rows"][0]
+            st.session_state["focus_code"] = list_source.iloc[sel_pos]["code"]
+
+    focus_code = st.session_state["focus_code"]
+
+    if not selected_codes or not focus_code:
+        st.info("サイドバーで銘柄を選択すると、ここに詳細が表示されます。")
+    else:
+        focus_name = master.loc[master["code"] == focus_code, "name"].values[0]
+        st.caption(f"🔗 詳しく調べる → [Yahoo!ファイナンスで{focus_name}を見る](https://finance.yahoo.co.jp/quote/{focus_code}.T)")
+
+        focus_fundamentals = fetch_fundamentals(focus_code)
+        fc1, fc2, fc3 = st.columns(3)
+        with fc1:
+            st.metric("PER", format_ratio(focus_fundamentals.get("per")), help=glossary_help("PER"))
+        with fc2:
+            st.metric("PBR", format_ratio(focus_fundamentals.get("pbr")), help=glossary_help("PBR"))
+        with fc3:
             st.metric(
-                "52週レンジ",
-                range_value,
-                help=glossary_help("52週レンジ") + f"\n\n52週高値: {high_52w:,.1f}円 ／ 52週安値: {low_52w:,.1f}円",
+                "配当利回り",
+                format_dividend_yield(focus_fundamentals.get("dividend_yield")),
+                help=glossary_help("配当利回り"),
             )
-        else:
-            st.metric("52週レンジ", "―", help=glossary_help("52週レンジ"))
-
-    spec_level_focus, spec_reason_focus = detect_speculative_signal(focus_code)
-    if spec_level_focus == "warning":
-        st.warning(
-            f"🚨 この銘柄は薄商いの状態で値動きが急変している可能性があります（{spec_reason_focus}）。"
-            "参加者が少ないため、少数の投資家グループでも株価を動かしやすく、仕手株的な値動きに巻き込まれるリスクが相対的に高いと考えられます。"
-            "値動きが荒く損失リスクも大きいため、投資判断は特に慎重に行ってください。"
-        )
-    elif spec_level_focus == "attention":
-        st.info(
-            f"👀 この銘柄は出来高を伴って値動きが急変しています（{spec_reason_focus}）。"
-            "決算発表や好材料のニュースなど、何らかの材料で市場の関心が高まっている可能性があります。"
-            "値動きが大きいこと自体に変わりはないため、材料や需給を確認したうえでご検討ください。"
-        )
-
-    trend_focus = compute_trend_status(focus_code)
-    entry_focus = compute_entry_quality(focus_code)
-    margin_focus = fetch_margin_balance(focus_code)
-    tc1, tc2, tc3 = st.columns(3)
-    with tc1:
-        if trend_focus:
-            if trend_focus.get("structure") == "perfect_order":
-                dev_txt = f"{trend_focus['dev25']:+.1f}%" if trend_focus.get("dev25") is not None else "―"
-                extended_note = "（伸びすぎ注意）" if trend_focus.get("extended") else ""
-                st.metric("トレンド確立度", f"📈 確立 {dev_txt}{extended_note}", help=glossary_help("トレンド確立度", "25日線乖離率"))
+        fc4, fc5 = st.columns(2)
+        with fc4:
+            st.metric("時価総額", format_market_cap(focus_fundamentals.get("market_cap")), help=glossary_help("時価総額"))
+        with fc5:
+            high_52w, low_52w = fetch_52w_range(focus_code)
+            if high_52w is not None and low_52w is not None and high_52w > low_52w:
+                latest_close_for_range = get_latest_price(focus_code)
+                if latest_close_for_range is not None:
+                    position_pct = (latest_close_for_range - low_52w) / (high_52w - low_52w) * 100
+                    range_value = f"位置 {position_pct:.0f}%"
+                else:
+                    range_value = "―"
+                st.metric(
+                    "52週レンジ",
+                    range_value,
+                    help=glossary_help("52週レンジ") + f"\n\n52週高値: {high_52w:,.1f}円 ／ 52週安値: {low_52w:,.1f}円",
+                )
             else:
-                st.metric("トレンド確立度", "🌱 未確立（反発初期の可能性）", help=glossary_help("トレンド確立度", "25日線乖離率"))
-        else:
-            st.metric("トレンド確立度", "―", help=glossary_help("トレンド確立度"))
-    with tc2:
-        if entry_focus and entry_focus.get("bullish"):
-            if entry_focus.get("reliable") is True:
-                st.metric("直近1日の初動の信頼度", "✅ 出来高を伴う陽線", help=glossary_help("初動の信頼度"))
-            elif entry_focus.get("reliable") is False:
-                st.metric("直近1日の初動の信頼度", "⚠ だましの可能性", help=glossary_help("初動の信頼度"))
-        elif entry_focus is not None:
-            st.metric("直近1日の初動の信頼度", "陰線（対象外）", help=glossary_help("初動の信頼度"))
-        else:
-            st.metric("直近1日の初動の信頼度", "―", help=glossary_help("初動の信頼度"))
-    with tc3:
-        if margin_focus and margin_focus.get("buy_balance") is not None:
-            trend_note = {"increasing": "（増加）", "decreasing": "（減少）", "flat": "（横ばい）"}.get(
-                margin_focus.get("trend"), ""
-            )
-            help_text = glossary_help("信用倍率") + f"\n\n{margin_focus['date']}時点のデータです。"
-            if margin_focus.get("margin_ratio") is not None:
-                help_text += f" 信用倍率: {margin_focus['margin_ratio']:.2f}倍。"
-            if margin_focus.get("sell_balance") is not None:
-                help_text += f" 信用売り残: {margin_focus['sell_balance']:,.0f}株。"
-            st.metric("信用買い残", f"{margin_focus['buy_balance']:,.0f}株{trend_note}", help=help_text)
-        else:
-            st.metric("信用買い残", "―", help=glossary_help("信用倍率") + "\n\nこの銘柄はデータを取得できませんでした。")
+                st.metric("52週レンジ", "―", help=glossary_help("52週レンジ"))
 
-    chart_days = st.select_slider(
-        "表示期間",
-        options=[10, 30, 60, 90, 180, 365, 730],
-        value=180,
-        format_func=lambda d: f"{d}日",
-    )
-    show_technical = st.checkbox(
-        "テクニカル指標を表示する（移動平均線・出来高・RSI）",
-        value=True,
-        help=glossary_help("移動平均線", "出来高", "RSI"),
-    )
-    chart_start = today - dt.timedelta(days=chart_days)
-
-    # 移動平均線(最大75日)が表示期間の最初から途切れないよう、表示開始日より前のぶんも多めに取得する
-    ma_buffer_start = chart_start - dt.timedelta(days=160)
-    hist_ext = fetch_history(focus_code, ma_buffer_start, today)
-    if not hist_ext.empty:
-        hist_ext = hist_ext.sort_index()
-        hist_ext["MA5"] = hist_ext["Close"].rolling(window=5, min_periods=5).mean()
-        hist_ext["MA25"] = hist_ext["Close"].rolling(window=25, min_periods=25).mean()
-        hist_ext["MA75"] = hist_ext["Close"].rolling(window=75, min_periods=75).mean()
-        hist_ext["RSI14"] = compute_rsi(hist_ext["Close"], period=14)
-        hist = hist_ext[(hist_ext.index.date >= chart_start) & (hist_ext.index.date <= today)]
-        if hist.empty:
-            hist = hist_ext
-    else:
-        hist = hist_ext
-
-    if hist.empty:
-        st.warning("株価データを取得できませんでした。銘柄コードや通信環境をご確認ください。")
-    else:
-        avg_volume, avg_value = compute_liquidity(hist)
-        if avg_value is not None and avg_value < LIQUIDITY_THIN_THRESHOLD:
+        spec_level_focus, spec_reason_focus = detect_speculative_signal(focus_code)
+        if spec_level_focus == "warning":
             st.warning(
-                f"⚠ この銘柄は直近の平均売買代金が{format_trading_value(avg_value)}と少なめです（薄商い）。"
-                "株価データが実勢の値動きを反映しにくく、急な値動きが出やすいので参考程度にご覧ください。"
+                f"🚨 この銘柄は薄商いの状態で値動きが急変している可能性があります（{spec_reason_focus}）。"
+                "参加者が少ないため、少数の投資家グループでも株価を動かしやすく、仕手株的な値動きに巻き込まれるリスクが相対的に高いと考えられます。"
+                "値動きが荒く損失リスクも大きいため、投資判断は特に慎重に行ってください。"
+            )
+        elif spec_level_focus == "attention":
+            st.info(
+                f"👀 この銘柄は出来高を伴って値動きが急変しています（{spec_reason_focus}）。"
+                "決算発表や好材料のニュースなど、何らかの材料で市場の関心が高まっている可能性があります。"
+                "値動きが大きいこと自体に変わりはないため、材料や需給を確認したうえでご検討ください。"
             )
 
-        if show_technical:
-            fig = make_subplots(
-                rows=3,
-                cols=1,
-                shared_xaxes=True,
-                vertical_spacing=0.04,
-                row_heights=[0.55, 0.18, 0.27],
-            )
-        else:
-            fig = make_subplots(rows=1, cols=1)
-
-        fig.add_trace(
-            go.Candlestick(
-                x=hist.index,
-                open=hist["Open"],
-                high=hist["High"],
-                low=hist["Low"],
-                close=hist["Close"],
-                increasing_line_color=UP_COLOR,
-                decreasing_line_color=DOWN_COLOR,
-                name=focus_name,
-                hovertemplate=(
-                    "%{x|%Y-%m-%d}<br>"
-                    "始値: %{open:.1f}円<br>"
-                    "高値: %{high:.1f}円<br>"
-                    "安値: %{low:.1f}円<br>"
-                    "終値: %{close:.1f}円<extra></extra>"
-                ),
-            ),
-            row=1,
-            col=1,
-        )
-
-        if show_technical:
-            fig.add_trace(
-                go.Scatter(
-                    x=hist.index, y=hist["MA5"], mode="lines", name="5日移動平均線",
-                    line=dict(color="#14804a", width=1.1),
-                ),
-                row=1, col=1,
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=hist.index, y=hist["MA25"], mode="lines", name="25日移動平均線",
-                    line=dict(color="#f5a623", width=1.3),
-                ),
-                row=1, col=1,
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=hist.index, y=hist["MA75"], mode="lines", name="75日移動平均線",
-                    line=dict(color="#6b46c1", width=1.3),
-                ),
-                row=1, col=1,
-            )
-
-            volume_colors = [
-                UP_COLOR if c >= o else DOWN_COLOR for o, c in zip(hist["Open"], hist["Close"])
-            ]
-            fig.add_trace(
-                go.Bar(x=hist.index, y=hist["Volume"], name="出来高", marker_color=volume_colors, opacity=0.6),
-                row=2, col=1,
-            )
-
-            fig.add_trace(
-                go.Scatter(
-                    x=hist.index, y=hist["RSI14"], mode="lines", name="RSI(14)",
-                    line=dict(color="#0d6efd", width=1.3),
-                ),
-                row=3, col=1,
-            )
-            fig.add_hline(y=70, row=3, col=1, line_dash="dot", line_color=UP_COLOR, line_width=1)
-            fig.add_hline(y=30, row=3, col=1, line_dash="dot", line_color=DOWN_COLOR, line_width=1)
-            fig.update_yaxes(title_text="株価(円)", row=1, col=1)
-            fig.update_yaxes(title_text="出来高", row=2, col=1)
-            fig.update_yaxes(title_text="RSI", range=[0, 100], row=3, col=1)
-        else:
-            fig.update_yaxes(title_text="株価(円)", row=1, col=1)
-
-        earnings_dates = fetch_earnings_dates(focus_code)
-        visible_earnings = [
-            d for d in earnings_dates if chart_start <= d <= today + dt.timedelta(days=365)
-        ]
-        vline_rows = (1, 2, 3) if show_technical else (1,)
-        for d in visible_earnings:
-            for rw in vline_rows:
-                fig.add_vline(x=pd.Timestamp(d), row=rw, col=1, line_width=1, line_dash="dash", line_color="#f5a623")
-        if visible_earnings:
-            fig.add_annotation(
-                x=pd.Timestamp(visible_earnings[0]),
-                y=1,
-                yref="paper",
-                text="決算発表",
-                showarrow=False,
-                font=dict(color="#f5a623", size=11),
-                yshift=10,
-            )
-
-        fig.update_layout(
-            title=f"{focus_code} {focus_name}",
-            xaxis_title=None,
-            hovermode="x unified",
-            height=820 if show_technical else 600,
-            margin=dict(t=50, b=10, l=10, r=10),
-            plot_bgcolor="white",
-            dragmode="zoom",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        )
-        # 土日は取引がなく空白になるため、詰めて表示する（短い期間ほど間延びして見づらくなるのを防ぐ）
-        fig.update_xaxes(
-            rangebreaks=[dict(bounds=["sat", "mon"])],
-            rangeslider_visible=False,
-        )
-
-        # クリックした地点の株価をピン留め表示（対応バージョンのStreamlitのみ）
-        event = None
-        try:
-            event = st.plotly_chart(
-                fig,
-                use_container_width=True,
-                on_select="rerun",
-                selection_mode=("points",),
-                key=f"candle_{focus_code}_{chart_days}_{show_technical}",
-            )
-        except TypeError:
-            # 古いバージョンのStreamlitでは on_select 未対応 → 通常表示にフォールバック
-            st.plotly_chart(fig, use_container_width=True)
-
-        clicked_row = None
-        clicked_date = None
-        if event is not None:
-            try:
-                sel = getattr(event, "selection", None)
-                if sel is None and isinstance(event, dict):
-                    sel = event.get("selection")
-                points = None
-                if sel is not None:
-                    points = sel.get("points") if isinstance(sel, dict) else getattr(sel, "points", None)
-                if points:
-                    p0 = points[0]
-                    curve_num = p0.get("curve_number") if isinstance(p0, dict) else getattr(p0, "curve_number", None)
-                    # ローソク足(trace 0)以外（移動平均線・出来高・RSI）のクリックはピン留め対象外にする
-                    if curve_num is None or curve_num == 0:
-                        idx = p0.get("point_index") if isinstance(p0, dict) else getattr(p0, "point_index", None)
-                        if idx is not None and 0 <= idx < len(hist):
-                            clicked_row = hist.iloc[idx]
-                            clicked_date = hist.index[idx].date()
-            except Exception:
-                clicked_row = None
-
-        if clicked_row is not None:
-            render_html(
-                f"""
-                <div class="pin-price">
-                    📍 <b>{clicked_date}</b> の株価
-                    始値 {clicked_row['Open']:.1f}円 ／
-                    高値 {clicked_row['High']:.1f}円 ／
-                    安値 {clicked_row['Low']:.1f}円 ／
-                    終値 <b>{clicked_row['Close']:.1f}円</b>
-                </div>
-                """
-            )
-        else:
-            st.caption("チャート上の見たい地点をクリックすると、その日の株価がピン留め表示されます。マウスを合わせるだけでも数値が出ます。")
-
-        pct, base_p, latest_p = pct_change_over_period(hist, chart_start, today)
-        m1, m2, m3 = st.columns(3)
-        with m1:
-            if pct is not None:
-                st.metric(label="表示期間トータル騰落率", value=f"{latest_p:.1f} 円", delta=f"{pct:+.2f}%")
-        with m2:
-            if visible_earnings:
-                st.metric(label="直近の決算発表日", value=str(visible_earnings[0]))
+        trend_focus = compute_trend_status(focus_code)
+        entry_focus = compute_entry_quality(focus_code)
+        margin_focus = fetch_margin_balance(focus_code)
+        tc1, tc2, tc3 = st.columns(3)
+        with tc1:
+            if trend_focus:
+                if trend_focus.get("structure") == "perfect_order":
+                    dev_txt = f"{trend_focus['dev25']:+.1f}%" if trend_focus.get("dev25") is not None else "―"
+                    extended_note = "（伸びすぎ注意）" if trend_focus.get("extended") else ""
+                    st.metric("トレンド確立度", f"📈 確立 {dev_txt}{extended_note}", help=glossary_help("トレンド確立度", "25日線乖離率"))
+                else:
+                    st.metric("トレンド確立度", "🌱 未確立（反発初期の可能性）", help=glossary_help("トレンド確立度", "25日線乖離率"))
             else:
-                st.metric(label="決算発表日", value="情報なし")
-        with m3:
-            st.metric(
-                label="平均出来高（直近20営業日）",
-                value=format_trading_value(avg_value),
-                help=glossary_help("出来高"),
+                st.metric("トレンド確立度", "―", help=glossary_help("トレンド確立度"))
+            st.caption(f"基準: MA5>MA25>MA75の並びで「確立」／25日線かい離+{TREND_EXTENDED_DEV_THRESHOLD:.0f}%以上で伸びすぎ注意")
+        with tc2:
+            if entry_focus and entry_focus.get("bullish"):
+                if entry_focus.get("reliable") is True:
+                    st.metric("直近1日の初動の信頼度", "✅ 出来高を伴う陽線", help=glossary_help("初動の信頼度"))
+                elif entry_focus.get("reliable") is False:
+                    st.metric("直近1日の初動の信頼度", "⚠ だましの可能性", help=glossary_help("初動の信頼度"))
+            elif entry_focus is not None:
+                st.metric("直近1日の初動の信頼度", "陰線（対象外）", help=glossary_help("初動の信頼度"))
+            else:
+                st.metric("直近1日の初動の信頼度", "―", help=glossary_help("初動の信頼度"))
+        with tc3:
+            if margin_focus and margin_focus.get("buy_balance") is not None:
+                trend_note = {"increasing": "（増加）", "decreasing": "（減少）", "flat": "（横ばい）"}.get(
+                    margin_focus.get("trend"), ""
+                )
+                help_text = glossary_help("信用倍率") + f"\n\n{margin_focus['date']}時点のデータです。"
+                if margin_focus.get("margin_ratio") is not None:
+                    help_text += f" 信用倍率: {margin_focus['margin_ratio']:.2f}倍。"
+                if margin_focus.get("sell_balance") is not None:
+                    help_text += f" 信用売り残: {margin_focus['sell_balance']:,.0f}株。"
+                st.metric("信用買い残", f"{margin_focus['buy_balance']:,.0f}株{trend_note}", help=help_text)
+            else:
+                st.metric("信用買い残", "―", help=glossary_help("信用倍率") + "\n\nこの銘柄はデータを取得できませんでした。")
+
+        chart_days = st.select_slider(
+            "表示期間",
+            options=[10, 30, 60, 90, 180, 365, 730],
+            value=180,
+            format_func=lambda d: f"{d}日",
+        )
+        show_technical = st.checkbox(
+            "テクニカル指標を表示する（移動平均線・出来高・RSI）",
+            value=True,
+            help=glossary_help("移動平均線", "出来高", "RSI"),
+        )
+        chart_start = today - dt.timedelta(days=chart_days)
+
+        # 移動平均線(最大75日)が表示期間の最初から途切れないよう、表示開始日より前のぶんも多めに取得する
+        ma_buffer_start = chart_start - dt.timedelta(days=160)
+        hist_ext = fetch_history(focus_code, ma_buffer_start, today)
+        if not hist_ext.empty:
+            hist_ext = hist_ext.sort_index()
+            hist_ext["MA5"] = hist_ext["Close"].rolling(window=5, min_periods=5).mean()
+            hist_ext["MA25"] = hist_ext["Close"].rolling(window=25, min_periods=25).mean()
+            hist_ext["MA75"] = hist_ext["Close"].rolling(window=75, min_periods=75).mean()
+            hist_ext["RSI14"] = compute_rsi(hist_ext["Close"], period=14)
+            hist = hist_ext[(hist_ext.index.date >= chart_start) & (hist_ext.index.date <= today)]
+            if hist.empty:
+                hist = hist_ext
+        else:
+            hist = hist_ext
+
+        if hist.empty:
+            st.warning("株価データを取得できませんでした。銘柄コードや通信環境をご確認ください。")
+        else:
+            avg_volume, avg_value = compute_liquidity(hist)
+            if avg_value is not None and avg_value < LIQUIDITY_THIN_THRESHOLD:
+                st.warning(
+                    f"⚠ この銘柄は直近の平均売買代金が{format_trading_value(avg_value)}と少なめです（薄商い）。"
+                    "株価データが実勢の値動きを反映しにくく、急な値動きが出やすいので参考程度にご覧ください。"
+                )
+
+            if show_technical:
+                fig = make_subplots(
+                    rows=3,
+                    cols=1,
+                    shared_xaxes=True,
+                    vertical_spacing=0.04,
+                    row_heights=[0.55, 0.18, 0.27],
+                )
+            else:
+                fig = make_subplots(rows=1, cols=1)
+
+            fig.add_trace(
+                go.Candlestick(
+                    x=hist.index,
+                    open=hist["Open"],
+                    high=hist["High"],
+                    low=hist["Low"],
+                    close=hist["Close"],
+                    increasing_line_color=UP_COLOR,
+                    decreasing_line_color=DOWN_COLOR,
+                    name=focus_name,
+                    hovertemplate=(
+                        "%{x|%Y-%m-%d}<br>"
+                        "始値: %{open:.1f}円<br>"
+                        "高値: %{high:.1f}円<br>"
+                        "安値: %{low:.1f}円<br>"
+                        "終値: %{close:.1f}円<extra></extra>"
+                    ),
+                ),
+                row=1,
+                col=1,
             )
+
+            if show_technical:
+                fig.add_trace(
+                    go.Scatter(
+                        x=hist.index, y=hist["MA5"], mode="lines", name="5日移動平均線",
+                        line=dict(color="#14804a", width=1.1),
+                    ),
+                    row=1, col=1,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=hist.index, y=hist["MA25"], mode="lines", name="25日移動平均線",
+                        line=dict(color="#f5a623", width=1.3),
+                    ),
+                    row=1, col=1,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=hist.index, y=hist["MA75"], mode="lines", name="75日移動平均線",
+                        line=dict(color="#6b46c1", width=1.3),
+                    ),
+                    row=1, col=1,
+                )
+
+                volume_colors = [
+                    UP_COLOR if c >= o else DOWN_COLOR for o, c in zip(hist["Open"], hist["Close"])
+                ]
+                fig.add_trace(
+                    go.Bar(x=hist.index, y=hist["Volume"], name="出来高", marker_color=volume_colors, opacity=0.6),
+                    row=2, col=1,
+                )
+
+                fig.add_trace(
+                    go.Scatter(
+                        x=hist.index, y=hist["RSI14"], mode="lines", name="RSI(14)",
+                        line=dict(color="#0d6efd", width=1.3),
+                    ),
+                    row=3, col=1,
+                )
+                fig.add_hline(y=70, row=3, col=1, line_dash="dot", line_color=UP_COLOR, line_width=1)
+                fig.add_hline(y=30, row=3, col=1, line_dash="dot", line_color=DOWN_COLOR, line_width=1)
+                fig.update_yaxes(title_text="株価(円)", row=1, col=1)
+                fig.update_yaxes(title_text="出来高", row=2, col=1)
+                fig.update_yaxes(title_text="RSI", range=[0, 100], row=3, col=1)
+            else:
+                fig.update_yaxes(title_text="株価(円)", row=1, col=1)
+
+            earnings_dates = fetch_earnings_dates(focus_code)
+            visible_earnings = [
+                d for d in earnings_dates if chart_start <= d <= today + dt.timedelta(days=365)
+            ]
+            vline_rows = (1, 2, 3) if show_technical else (1,)
+            for d in visible_earnings:
+                for rw in vline_rows:
+                    fig.add_vline(x=pd.Timestamp(d), row=rw, col=1, line_width=1, line_dash="dash", line_color="#f5a623")
+            if visible_earnings:
+                fig.add_annotation(
+                    x=pd.Timestamp(visible_earnings[0]),
+                    y=1,
+                    yref="paper",
+                    text="決算発表",
+                    showarrow=False,
+                    font=dict(color="#f5a623", size=11),
+                    yshift=10,
+                )
+
+            fig.update_layout(
+                title=f"{focus_code} {focus_name}",
+                xaxis_title=None,
+                hovermode="x unified",
+                height=820 if show_technical else 600,
+                margin=dict(t=50, b=10, l=10, r=10),
+                plot_bgcolor="white",
+                dragmode="zoom",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            # 土日は取引がなく空白になるため、詰めて表示する（短い期間ほど間延びして見づらくなるのを防ぐ）
+            fig.update_xaxes(
+                rangebreaks=[dict(bounds=["sat", "mon"])],
+                rangeslider_visible=False,
+            )
+
+            # クリックした地点の株価をピン留め表示（対応バージョンのStreamlitのみ）
+            event = None
+            try:
+                event = st.plotly_chart(
+                    fig,
+                    use_container_width=True,
+                    on_select="rerun",
+                    selection_mode=("points",),
+                    key=f"candle_{focus_code}_{chart_days}_{show_technical}",
+                )
+            except TypeError:
+                # 古いバージョンのStreamlitでは on_select 未対応 → 通常表示にフォールバック
+                st.plotly_chart(fig, use_container_width=True)
+
+            clicked_row = None
+            clicked_date = None
+            if event is not None:
+                try:
+                    sel = getattr(event, "selection", None)
+                    if sel is None and isinstance(event, dict):
+                        sel = event.get("selection")
+                    points = None
+                    if sel is not None:
+                        points = sel.get("points") if isinstance(sel, dict) else getattr(sel, "points", None)
+                    if points:
+                        p0 = points[0]
+                        curve_num = p0.get("curve_number") if isinstance(p0, dict) else getattr(p0, "curve_number", None)
+                        # ローソク足(trace 0)以外（移動平均線・出来高・RSI）のクリックはピン留め対象外にする
+                        if curve_num is None or curve_num == 0:
+                            idx = p0.get("point_index") if isinstance(p0, dict) else getattr(p0, "point_index", None)
+                            if idx is not None and 0 <= idx < len(hist):
+                                clicked_row = hist.iloc[idx]
+                                clicked_date = hist.index[idx].date()
+                except Exception:
+                    clicked_row = None
+
+            if clicked_row is not None:
+                render_html(
+                    f"""
+                    <div class="pin-price">
+                        📍 <b>{clicked_date}</b> の株価
+                        始値 {clicked_row['Open']:.1f}円 ／
+                        高値 {clicked_row['High']:.1f}円 ／
+                        安値 {clicked_row['Low']:.1f}円 ／
+                        終値 <b>{clicked_row['Close']:.1f}円</b>
+                    </div>
+                    """
+                )
+            else:
+                st.caption("チャート上の見たい地点をクリックすると、その日の株価がピン留め表示されます。マウスを合わせるだけでも数値が出ます。")
+
+            pct, base_p, latest_p = pct_change_over_period(hist, chart_start, today)
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                if pct is not None:
+                    st.metric(label="表示期間トータル騰落率", value=f"{latest_p:.1f} 円", delta=f"{pct:+.2f}%")
+            with m2:
+                if visible_earnings:
+                    st.metric(label="直近の決算発表日", value=str(visible_earnings[0]))
+                else:
+                    st.metric(label="決算発表日", value="情報なし")
+            with m3:
+                st.metric(
+                    label="平均出来高（直近20営業日）",
+                    value=format_trading_value(avg_value),
+                    help=glossary_help("出来高"),
+                )
 
 # --- タブ3: 決算カレンダー -------------------------------------------------
 with tab3:
