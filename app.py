@@ -13,7 +13,7 @@
   - stocks.csv に登録した銘柄をセクターごとに一覧・比較
   - サイドバー上部で銘柄名・証券コードを検索し、その場で一覧に追加できる
   - お気に入りグループを作成して、好きな銘柄をまとめて管理できる
-  - 1日〜1年まで細かく期間を指定してトータルの騰落率(%)を表示
+  - 1日〜1年まで細かく期間を指定してトータル騰落率(%)を表示
   - 大きなローソク足チャート（25日/75日移動平均線・出来高・RSIを併記）。クリックした地点の株価をピン留め表示
   - 決算発表日をカード・カレンダー表の両方で確認できる
   - PER・PBR・配当利回り・時価総額などのファンダメンタルズ指標を表示
@@ -239,6 +239,11 @@ def inject_style():
 
         html, body, [class*="css"] {
             font-family: 'Noto Sans JP', sans-serif;
+            /* スマホ側のOS/ブラウザが「ダークモード」だと、Streamlit標準の文字色が
+               白系に切り替わり、このアプリが明示的に指定した白背景（カード等）と
+               衝突して「白文字が白背景に溶け込んで見えない」状態になることがある。
+               ページ自体は常にライトテーマである旨を明示し、端末側の自動反転を防ぐ。 */
+            color-scheme: light;
         }
 
         @keyframes fadeInUp {
@@ -249,6 +254,35 @@ def inject_style():
         /* 背景 */
         [data-testid="stAppViewContainer"] {
             background: linear-gradient(180deg, #f7f8fc 0%, #eef1f8 100%);
+            color: #1a1a1a;
+        }
+
+        /* 見出し・本文・指標（st.metric）・キャプションなど、個別に色指定していない
+           標準のテキストは、端末のダークモード設定に関係なく常に濃色で表示する。
+           （.app-header / .portfolio-summary / .pin-price は下でそれぞれ
+           !important付きの白文字を指定しているため、こちらでは上書きしない） */
+        [data-testid="stMarkdownContainer"] h1,
+        [data-testid="stMarkdownContainer"] h2,
+        [data-testid="stMarkdownContainer"] h3,
+        [data-testid="stMarkdownContainer"] h4,
+        [data-testid="stMarkdownContainer"] p,
+        [data-testid="stMarkdownContainer"] li,
+        [data-testid="stMarkdownContainer"] strong,
+        [data-testid="stCaptionContainer"],
+        [data-testid="stCaptionContainer"] p,
+        [data-testid="stExpander"] summary,
+        [data-testid="stExpander"] summary span,
+        label,
+        [data-testid="stWidgetLabel"] p {
+            color: #1a1a1a;
+        }
+        div[data-testid="stMetricValue"],
+        div[data-testid="stMetricLabel"],
+        div[data-testid="stMetricDelta"] {
+            color: #1a1a1a !important;
+        }
+        [data-testid="stDataFrame"] {
+            color-scheme: light;
         }
 
         /* サイドバー */
