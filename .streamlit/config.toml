@@ -1,0 +1,12 @@
+[theme]
+# 端末側のOS/ブラウザのダークモード設定に関係なく、常にライトテーマで表示する。
+# これを指定しないと、閲覧者のスマホがダークモードのときにStreamlit標準の文字色が
+# 白系に切り替わり、アプリ側で明示的に白背景にしているカード等と衝突して
+# 「白文字が白背景に溶け込んで見えない」問題が起きる（st.metricやst.dataframeなど、
+# CSSで直接色を上書きできないコンポーネントにも効くのが利点）。
+base = "light"
+primaryColor = "#e5484d"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f7f8fc"
+textColor = "#1a1a1a"
+font = "sans serif"
