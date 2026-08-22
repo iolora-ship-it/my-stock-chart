@@ -1683,6 +1683,120 @@ with st.spinner("株価データを取得中です…"):
 
 result_df = pd.DataFrame(rows).sort_values("pct", ascending=False, na_position="last")
 
+
+def build_quick_summary(r: dict, margin, range_pos):
+    """タブ1のカード展開用に、既存の指標（トレンド確立度・初動の信頼度・仕手株判定など）を
+    機械的に文章化した簡易まとめを作る（生成AIによる分析ではないルールベースの自動要約）。"""
+    parts = []
+    if pd.notna(r.get("pct")):
+        seg = f"直近{period_choice}で{r['pct']:+.2f}%"
+        if pd.notna(r.get("base_p")) and pd.notna(r.get("latest_p")):
+            seg += f"（{r['base_p']:.1f}円→{r['latest_p']:.1f}円）"
+        parts.append(seg + "の値動きです。")
+
+    trend = r.get("trend_status")
+    if isinstance(trend, dict):
+        if trend.get("structure") == "perfect_order":
+            dev = trend.get("dev25")
+            dev_txt = f"{dev:+.1f}%" if dev is not None else "―"
+            extended = "、伸びすぎ水準です" if trend.get("extended") else ""
+            parts.append(f"移動平均線はトレンド確立状態で、25日線から{dev_txt}かい離しています{extended}。")
+        else:
+            parts.append("移動平均線はまだトレンド未確立で、底値圏からの反発を試している段階の可能性があります。")
+
+    eq = r.get("entry_quality")
+    if isinstance(eq, dict) and eq.get("bullish"):
+        if eq.get("reliable") is True:
+            parts.append("直近1営業日は出来高を伴う陽線で、初動の信頼度は高めです。")
+        elif eq.get("reliable") is False:
+            parts.append("直近1営業日は陽線ですが、出来高や終値位置などの条件を満たさず、だまし初動の可能性があります。")
+
+    if r.get("spec_level") == "warning":
+        parts.append(f"薄商いの状態で値動きが急変しており（{r.get('spec_reason', '')}）、仕手株的なリスクに注意が必要です。")
+    elif r.get("spec_level") == "attention":
+        parts.append(f"出来高を伴って値動きが急変しています（{r.get('spec_reason', '')}）。材料の有無を確認しましょう。")
+
+    if margin and margin.get("buy_balance") is not None:
+        trend_note = {"increasing": "増加", "decreasing": "減少", "flat": "横ばい"}.get(margin.get("trend"), "")
+        if trend_note:
+            parts.append(f"信用買い残は前週比で{trend_note}傾向です。")
+
+    if range_pos is not None:
+        parts.append(f"52週レンジでは現在値が{range_pos:.0f}%の位置にあります。")
+
+    if not parts:
+        return "十分なデータが取得できず、自動要約を作成できませんでした。"
+    return "".join(parts)
+
+
+def render_quick_detail(code: str, name: str, r: dict):
+    """タブ1のカードをワンクリックで開いたときに表示する簡易詳細
+    （ミニチャート＋主要指標＋自動要約）。個別チャートタブほど多機能ではないが、
+    セクター比較の一覧を見たまま、その場でざっと値動きを確認できるようにする。"""
+    chart_start = today - dt.timedelta(days=90)
+    ma_buffer_start = chart_start - dt.timedelta(days=160)
+    hist_ext = fetch_history(code, ma_buffer_start, today)
+    high_52w, low_52w = fetch_52w_range(code)
+    margin = fetch_margin_balance(code)
+
+    range_pos = None
+    if high_52w is not None and low_52w is not None and high_52w > low_52w:
+        latest_close = get_latest_price(code)
+        if latest_close is not None:
+            range_pos = (latest_close - low_52w) / (high_52w - low_52w) * 100
+
+    if hist_ext.empty:
+        st.caption("チャートデータを取得できませんでした。")
+    else:
+        hist_ext = hist_ext.sort_index()
+        hist_ext["MA5"] = hist_ext["Close"].rolling(window=5, min_periods=5).mean()
+        hist_ext["MA25"] = hist_ext["Close"].rolling(window=25, min_periods=25).mean()
+        hist_ext["MA75"] = hist_ext["Close"].rolling(window=75, min_periods=75).mean()
+        hist_mini = hist_ext[(hist_ext.index.date >= chart_start) & (hist_ext.index.date <= today)]
+        if hist_mini.empty:
+            hist_mini = hist_ext
+
+        fig = go.Figure()
+        fig.add_trace(
+            go.Candlestick(
+                x=hist_mini.index,
+                open=hist_mini["Open"], high=hist_mini["High"],
+                low=hist_mini["Low"], close=hist_mini["Close"],
+                increasing_line_color=UP_COLOR, decreasing_line_color=DOWN_COLOR,
+                name=name,
+                hovertemplate="%{x|%Y-%m-%d}<br>終値: %{close:.1f}円<extra></extra>",
+            )
+        )
+        fig.add_trace(go.Scatter(x=hist_mini.index, y=hist_mini["MA5"], mode="lines", name="5日線", line=dict(color="#14804a", width=1)))
+        fig.add_trace(go.Scatter(x=hist_mini.index, y=hist_mini["MA25"], mode="lines", name="25日線", line=dict(color="#f5a623", width=1.2)))
+        fig.add_trace(go.Scatter(x=hist_mini.index, y=hist_mini["MA75"], mode="lines", name="75日線", line=dict(color="#6b46c1", width=1.2)))
+        fig.update_layout(
+            height=320,
+            margin=dict(t=10, b=10, l=10, r=10),
+            plot_bgcolor="white",
+            showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="right", x=1),
+            xaxis_rangeslider_visible=False,
+        )
+        fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+        st.plotly_chart(fig, use_container_width=True, key=f"tab1_minichart_{code}")
+        st.caption("直近90日の簡易チャートです。より詳しい期間指定やRSI等は「🕯️ 個別チャート」タブでご覧いただけます。")
+
+    dc1, dc2 = st.columns(2)
+    with dc1:
+        st.metric("52週レンジ", f"位置 {range_pos:.0f}%" if range_pos is not None else "―", help=glossary_help("52週レンジ"))
+    with dc2:
+        if margin and margin.get("buy_balance") is not None:
+            trend_note = {"increasing": "（増加）", "decreasing": "（減少）", "flat": "（横ばい）"}.get(margin.get("trend"), "")
+            st.metric("信用買い残", f"{margin['buy_balance']:,.0f}株{trend_note}", help=glossary_help("信用倍率"))
+        else:
+            st.metric("信用買い残", "―", help=glossary_help("信用倍率"))
+
+    st.markdown("**📝 直近の動きまとめ**")
+    st.caption(build_quick_summary(r, margin, range_pos))
+    st.caption("※ 上記はトレンド確立度・初動の信頼度・仕手株判定などの指標を機械的に文章化した自動要約です。生成AIによる分析ではなく、投資判断の根拠として断定的に用いないでください。")
+
+
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
     ["📊 セクター比較", "🕯️ 個別チャート", "🗓️ 決算カレンダー", "💼 ポートフォリオ", "🌍 市場概況"]
 )
@@ -1842,6 +1956,20 @@ with tab1:
             </div>
             """
         )
+
+        detail_key = f"tab1_detail_{r['code']}"
+        if detail_key not in st.session_state:
+            st.session_state[detail_key] = False
+        toggle_label = "📉 詳細を閉じる" if st.session_state[detail_key] else "📊 詳しく見る（チャート・分析）"
+        if st.button(toggle_label, key=f"tab1_detail_btn_{r['code']}", use_container_width=True):
+            st.session_state[detail_key] = not st.session_state[detail_key]
+            st.rerun()
+
+        if st.session_state[detail_key]:
+            with st.container(border=True):
+                render_quick_detail(r["code"], r["name"], r)
+
+        st.markdown("")
 
 # --- タブ2: 個別チャート ---------------------------------------------------
 with tab2:
