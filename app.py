@@ -105,6 +105,12 @@ GLOSSARY = {
         "出来高を伴わない上昇や、値幅の下の方で引けた上昇は、翌日以降に反落する「だまし」の可能性が相対的に高いとされます。"
         "あくまで直近1日のパターンによる目安であり、材料の有無などは別途ご確認ください。"
     ),
+    "信用倍率": (
+        "信用取引で「買い建て（信用買い）」している株数と「売り建て（空売り）」している株数の比率（信用買い残 ÷ 信用売り残）です。"
+        "信用買い残は将来いずれ反対売買（返済売り）される「将来の売り圧力」、信用売り残は将来の買い戻し（＝将来の買い圧力）とみなされます。"
+        "信用買い残が積み上がっている（倍率が高い）ほど、株価が伸び悩んだ際に期日を迎えた信用買いの投げ売りが出やすく、上値を抑える要因になり得ます。"
+        "逆に信用売り残が多い（倍率が低い）場合は、将来の買い戻し需要が相対的に大きいと考えられます。週次データのため直近の急な変化は反映されません。"
+    ),
 }
 
 
@@ -473,6 +479,106 @@ def inject_style():
             font-size: 0.95rem;
         }
         .pin-price b { font-size: 1.1rem; }
+
+        /* ---------------------------------------------------------------
+           スマホ表示向けの調整（画面幅640px以下）
+           ・st.columns()の横並びは狭い画面だと1列あたりが狭くなりすぎて
+             数値や文字が折り返し・見切れの原因になるため、2列グリッドに変更
+             （サイドバーは元々コンパクトなので対象外にする）。
+           ・銘柄カード上部の「名前＋コード」と「騰落率＋バッジ」の行は、
+             インラインstyleでflex-wrapが指定されていないため、バッジが
+             複数付くと画面外にはみ出して文字が見えなくなっていた。
+             ここを!important付きのクラスセレクタで上書きして折り返す
+             （author stylesheetの!importantはインラインstyleより優先される）。
+           ・見出しや指標・バッジのフォントサイズも全体的に少し縮小する。
+           --------------------------------------------------------------- */
+        @media (max-width: 640px) {
+            .app-header {
+                padding: 16px 16px;
+            }
+            .app-header h1 {
+                font-size: 1.25rem;
+            }
+            .app-header p {
+                font-size: 0.82rem;
+            }
+            div[data-testid="stMetric"] {
+                padding: 10px 10px 8px 10px;
+            }
+            div[data-testid="stMetricValue"] {
+                font-size: 1.15rem !important;
+            }
+            div[data-testid="stMetricLabel"] {
+                font-size: 0.8rem !important;
+            }
+
+            /* st.columns()の横並びを2列グリッドに（サイドバーは除く） */
+            [data-testid="stHorizontalBlock"] {
+                flex-wrap: wrap !important;
+                row-gap: 10px;
+            }
+            [data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+                min-width: 46% !important;
+                flex: 1 1 46% !important;
+                width: 46% !important;
+            }
+            section[data-testid="stSidebar"] [data-testid="stHorizontalBlock"] {
+                flex-wrap: nowrap !important;
+            }
+            section[data-testid="stSidebar"] [data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+                min-width: 0 !important;
+                width: auto !important;
+            }
+
+            /* 銘柄カード：ヘッダー行がバッジではみ出さないよう折り返す */
+            .stock-card {
+                padding: 14px 14px;
+            }
+            .stock-card > div:first-child {
+                flex-wrap: wrap !important;
+                row-gap: 8px;
+            }
+            .stock-card > div:first-child > div:last-child {
+                text-align: left !important;
+                width: 100%;
+            }
+            .stock-card .name {
+                font-size: 0.98rem;
+            }
+            .stock-card .pct {
+                font-size: 1.35rem;
+            }
+            .stock-card .badge {
+                font-size: 0.7rem;
+                padding: 3px 8px;
+                margin-left: 0;
+                margin-right: 6px;
+                margin-top: 4px;
+            }
+            .stock-card .badge-thin,
+            .stock-card .badge-spec,
+            .stock-card .badge-attention,
+            .stock-card .badge-trend-ok,
+            .stock-card .badge-trend-none,
+            .stock-card .badge-entry-good,
+            .stock-card .badge-entry-bad {
+                margin-left: 0;
+                margin-right: 6px;
+            }
+            .stock-card .fundamentals-row {
+                gap: 6px 10px;
+            }
+            .stock-card .fundamentals-row span {
+                font-size: 0.74rem;
+            }
+
+            .portfolio-summary {
+                padding: 14px 16px;
+            }
+            .portfolio-summary .value {
+                font-size: 1.2rem;
+            }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -764,6 +870,104 @@ def compute_entry_quality(code: str):
     }
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_margin_balance(code: str):
+    """かぶたんの週次信用残時系列データ（kabuka?ashi=shin）から、直近の信用買い残・売り残・信用倍率と、
+    前週からの買い残の増減（積み上がっているか減っているか）を取得する。
+    信用買い残は将来いずれ反対売買（返済売り）される「将来の売り圧力」の目安になる。
+
+    戻り値: dict または None（取得・解析できない場合）
+      date: 直近データの週（YY/MM/DD文字列）
+      buy_balance / sell_balance: 信用買い残・売り残（株）
+      margin_ratio: 信用倍率（買い残 ÷ 売り残）
+      buy_change_pct: 前週からの買い残の増減率(%)
+      trend: "increasing" / "decreasing" / "flat"（買い残の増減傾向）
+    """
+
+    def _num(s):
+        s = (s or "").strip().replace(",", "")
+        if s in ("", "－", "-", "―"):
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            return None
+
+    def _date_key(d):
+        try:
+            y, mo, da = d.split("/")
+            return (int(y), int(mo), int(da))
+        except Exception:
+            return (0, 0, 0)
+
+    try:
+        url = f"https://kabutan.jp/stock/kabuka?code={code}&ashi=shin"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        resp = requests.get(url, headers=headers, timeout=8)
+        resp.raise_for_status()
+        html = resp.text
+    except Exception:
+        return None
+
+    row_re = re.compile(
+        r"<tr>\s*<th[^>]*><time[^>]*>([\d/]+)</time></th>\s*"
+        r"<td[^>]*>([^<]*)</td>\s*"
+        r"<td[^>]*><span[^>]*>([^<]*)</span></td>\s*"
+        r"<td[^>]*>([^<]*)</td>\s*"
+        r"<td[^>]*>([^<]*)</td>\s*"
+        r"<td[^>]*>([^<]*)</td>\s*"
+        r"<td[^>]*>([^<]*)</td>\s*"
+        r"<td[^>]*>([^<]*)</td>\s*"
+        r"</tr>"
+    )
+    rows = []
+    try:
+        for m in row_re.finditer(html):
+            date_str, _close_s, _week_pct_s, _avg_price_s, _volume_s, sell_s, buy_s, ratio_s = m.groups()
+            buy_balance = _num(buy_s)
+            sell_balance = _num(sell_s)
+            if buy_balance is None and sell_balance is None:
+                continue
+            rows.append(
+                {
+                    "date": date_str,
+                    "buy_balance": buy_balance,
+                    "sell_balance": sell_balance,
+                    "margin_ratio": _num(ratio_s),
+                }
+            )
+    except Exception:
+        return None
+    if not rows:
+        return None
+
+    rows.sort(key=lambda r: _date_key(r["date"]), reverse=True)
+    latest = rows[0]
+    if latest["buy_balance"] is None:
+        return None
+    prev = next((r for r in rows[1:] if r["buy_balance"] is not None), None)
+
+    buy_change_pct = None
+    trend = None
+    if prev is not None and prev["buy_balance"]:
+        buy_change_pct = (latest["buy_balance"] - prev["buy_balance"]) / prev["buy_balance"] * 100
+        if buy_change_pct > 3:
+            trend = "increasing"
+        elif buy_change_pct < -3:
+            trend = "decreasing"
+        else:
+            trend = "flat"
+
+    return {
+        "date": latest["date"],
+        "buy_balance": latest["buy_balance"],
+        "sell_balance": latest["sell_balance"],
+        "margin_ratio": latest["margin_ratio"],
+        "buy_change_pct": buy_change_pct,
+        "trend": trend,
+    }
+
+
 def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     """簡易RSI（相対力指数）を計算する。0〜100で、70以上=買われすぎ、30以下=売られすぎの目安。"""
     delta = close.diff()
@@ -773,7 +977,7 @@ def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     avg_loss = loss.rolling(window=period, min_periods=period).mean()
     rs = avg_gain / avg_loss.replace(0, pd.NA)
     rsi = 100 - (100 / (1 + rs))
-    # 値下がりが一度もない区間はavg_loss=0でRSIが未定義になるため100（買われすぎ側の極値）とする
+    # 値下がりが一度もない区間ではavg_loss=0でRSIが未定義になるため100（買われすぎ側の極値）とする
     rsi = rsi.fillna(100)
     rsi[avg_gain.isna()] = pd.NA
     return rsi
@@ -1327,7 +1531,7 @@ st.caption(f"📅 上の指標は選択中の期間「{period_choice}」での�
 st.markdown("")
 
 # ---------------------------------------------------------------------------
-# セクターの勢い（上位・下位）— トップページのハイライト
+# セクターの勢い（上位・下位） — トップページのハイライト
 # ---------------------------------------------------------------------------
 st.markdown("### 🔥 セクターの勢い")
 st.caption(f"各セクターの代表銘柄をもとにした、期間「{period_choice}」の平均騰落率ランキングです。")
@@ -1648,7 +1852,8 @@ with tab2:
 
     trend_focus = compute_trend_status(focus_code)
     entry_focus = compute_entry_quality(focus_code)
-    tc1, tc2 = st.columns(2)
+    margin_focus = fetch_margin_balance(focus_code)
+    tc1, tc2, tc3 = st.columns(3)
     with tc1:
         if trend_focus:
             if trend_focus.get("structure") == "perfect_order":
@@ -1669,6 +1874,19 @@ with tab2:
             st.metric("直近1日の初動の信頼度", "陰線（対象外）", help=glossary_help("初動の信頼度"))
         else:
             st.metric("直近1日の初動の信頼度", "―", help=glossary_help("初動の信頼度"))
+    with tc3:
+        if margin_focus and margin_focus.get("buy_balance") is not None:
+            trend_note = {"increasing": "（増加）", "decreasing": "（減少）", "flat": "（横ばい）"}.get(
+                margin_focus.get("trend"), ""
+            )
+            help_text = glossary_help("信用倍率") + f"\n\n{margin_focus['date']}時点のデータです。"
+            if margin_focus.get("margin_ratio") is not None:
+                help_text += f" 信用倍率: {margin_focus['margin_ratio']:.2f}倍。"
+            if margin_focus.get("sell_balance") is not None:
+                help_text += f" 信用売り残: {margin_focus['sell_balance']:,.0f}株。"
+            st.metric("信用買い残", f"{margin_focus['buy_balance']:,.0f}株{trend_note}", help=help_text)
+        else:
+            st.metric("信用買い残", "―", help=glossary_help("信用倍率") + "\n\nこの銘柄はデータを取得できませんでした。")
 
     chart_days = st.select_slider(
         "表示期間",
