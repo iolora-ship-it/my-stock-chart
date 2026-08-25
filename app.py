@@ -45,6 +45,7 @@ import yfinance as yf
 st.set_page_config(page_title="My Stock Chart", layout="wide", page_icon="📈")
 
 STOCKS_CSV = "stocks.csv"
+LOWPRICE_CSV = "lowprice_stocks.csv"
 GROUPS_FILE = "groups.json"
 PORTFOLIO_FILE = "portfolio.json"
 
@@ -112,7 +113,7 @@ GLOSSARY = {
     "信用倍率": (
         "信用取引で「買い建て（信用買い）」している株数と「売り建て（空売り）」している株数の比率（信用買い残 ÷ 信用売り残）です。"
         "信用買い残は将来いずれ反対売買（返済売り）される「将来の売り圧力」、信用売り残は将来の買い戻し（＝将来の買い圧力）とみなされます。"
-        "信用買い残が積み上がっている（倍率が高い）ほど、株価が伸び悩んだ際に期日を迎えた信用買いの投げ売りが出やすく、上値を抑える要因になり得ます。"
+        "信用買い残が積み上がっている（倍率が高い）ほど、株価が伸び悩んだ際に期日を迎えた信用買いの投を売りが出やすく、上値を抑える要因になり得ます。"
         "逆に信用売り残が多い（倍率が低い）場合は、将来の買い戻し需要が相対的に大きいと考えられます。週次データのため直近の急な変化は反映されません。"
     ),
 }
@@ -1022,7 +1023,7 @@ def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     avg_loss = loss.rolling(window=period, min_periods=period).mean()
     rs = avg_gain / avg_loss.replace(0, pd.NA)
     rsi = 100 - (100 / (1 + rs))
-    # 値下がりが一度もない区間ではavg_loss=0でRSIが未定義になるため100（買われすぎ側の極値）とする
+    # 値下がりが一度もない区間はavg_loss=0でRSIが未定義になるため100（買われすぎ側の極値）とする
     rsi = rsi.fillna(100)
     rsi[avg_gain.isna()] = pd.NA
     return rsi
@@ -1318,6 +1319,288 @@ def get_latest_price(code: str):
 
 
 # ---------------------------------------------------------------------------
+# 低位株・無名株分析ページ（サイドバーの「グループを管理」下のページ切替から表示）
+# ---------------------------------------------------------------------------
+def _build_lowprice_summary(r: dict, margin, range_pos, period_choice: str) -> str:
+    """低位株ページのカード展開用に、既存指標を機械的に文章化した簡易まとめを作る
+    （生成AIによる分析ではないルールベースの自動要約）。"""
+    parts = []
+    if pd.notna(r.get("pct")):
+        seg = f"直近{period_choice}で{r['pct']:+.2f}%"
+        if pd.notna(r.get("base_p")) and pd.notna(r.get("latest_p")):
+            seg += f"（{r['base_p']:.1f}円→{r['latest_p']:.1f}円）"
+        parts.append(seg + "の値動きです。")
+
+    trend = r.get("trend_status")
+    if isinstance(trend, dict):
+        if trend.get("structure") == "perfect_order":
+            dev = trend.get("dev25")
+            dev_txt = f"{dev:+.1f}%" if dev is not None else "―"
+            extended = "、伸びすぎ水準です" if trend.get("extended") else ""
+            parts.append(f"移動平均線はトレンド確立状態で、25日線から{dev_txt}かい離しています{extended}。")
+        else:
+            parts.append("移動平均線はまだトレンド未確立で、底値圏からの反発を試している段階の可能性があります。")
+
+    eq = r.get("entry_quality")
+    if isinstance(eq, dict) and eq.get("bullish"):
+        if eq.get("reliable") is True:
+            parts.append("直近1営業日は出来高を伴う陽線で、初動の信頼度は高めです。")
+        elif eq.get("reliable") is False:
+            parts.append("直近1営業日は陽線ですが、出来高や終値位置などの条件を満たさず、だまし初動の可能性があります。")
+
+    if r.get("spec_level") == "warning":
+        parts.append(f"薄商いの状態で値動きが急変しており（{r.get('spec_reason', '')}）、仕手株的なリスクに注意が必要です。")
+    elif r.get("spec_level") == "attention":
+        parts.append(f"出来高を伴って値動きが急変しています（{r.get('spec_reason', '')}）。材料の有無を確認しましょう。")
+
+    if margin and margin.get("buy_balance") is not None:
+        trend_note = {"increasing": "増加", "decreasing": "減少", "flat": "横ばい"}.get(margin.get("trend"), "")
+        if trend_note:
+            parts.append(f"信用買い残は前週比で{trend_note}傾向です。")
+
+    if range_pos is not None:
+        parts.append(f"52週レンジでは現在値が{range_pos:.0f}%の位置にあります。")
+
+    if not parts:
+        return "十分なデータが取得できず、自動要約を作成できませんでした。"
+    return "".join(parts)
+
+
+def _render_lowprice_detail(code: str, name: str, r: dict, period_choice: str, today_local: dt.date):
+    """低位株ページのカードをワンクリックで開いたときに表示する簡易詳細
+    （ミニチャート＋主要指標＋自動要約）。"""
+    chart_start = today_local - dt.timedelta(days=90)
+    ma_buffer_start = chart_start - dt.timedelta(days=160)
+    hist_ext = fetch_history(code, ma_buffer_start, today_local)
+    high_52w, low_52w = fetch_52w_range(code)
+    margin = fetch_margin_balance(code)
+    range_pos = None
+    if high_52w is not None and low_52w is not None and high_52w > low_52w:
+        latest_close = get_latest_price(code)
+        if latest_close is not None:
+            range_pos = (latest_close - low_52w) / (high_52w - low_52w) * 100
+
+    if hist_ext.empty:
+        st.caption("チャートデータを取得できませんでした。")
+    else:
+        hist_ext = hist_ext.sort_index()
+        hist_ext["MA5"] = hist_ext["Close"].rolling(window=5, min_periods=5).mean()
+        hist_ext["MA25"] = hist_ext["Close"].rolling(window=25, min_periods=25).mean()
+        hist_ext["MA75"] = hist_ext["Close"].rolling(window=75, min_periods=75).mean()
+        hist_mini = hist_ext[(hist_ext.index.date >= chart_start) & (hist_ext.index.date <= today_local)]
+        if hist_mini.empty:
+            hist_mini = hist_ext
+        fig = go.Figure()
+        fig.add_trace(go.Candlestick(
+            x=hist_mini.index, open=hist_mini["Open"], high=hist_mini["High"],
+            low=hist_mini["Low"], close=hist_mini["Close"], increasing_line_color=UP_COLOR,
+            decreasing_line_color=DOWN_COLOR, name=name,
+            hovertemplate="%{x|%Y-%m-%d}<br>終値: %{close:.1f}円<extra></extra>",
+        ))
+        fig.add_trace(go.Scatter(x=hist_mini.index, y=hist_mini["MA5"], mode="lines", name="5日線", line=dict(color="#14804a", width=1)))
+        fig.add_trace(go.Scatter(x=hist_mini.index, y=hist_mini["MA25"], mode="lines", name="25日線", line=dict(color="#f5a623", width=1.2)))
+        fig.add_trace(go.Scatter(x=hist_mini.index, y=hist_mini["MA75"], mode="lines", name="75日線", line=dict(color="#6b46c1", width=1.2)))
+        fig.update_layout(
+            height=320, margin=dict(t=10, b=10, l=10, r=10), plot_bgcolor="white",
+            showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="right", x=1),
+            xaxis_rangeslider_visible=False,
+        )
+        fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+        st.plotly_chart(fig, use_container_width=True, key=f"lowprice_minichart_{code}")
+        st.caption("直近90日の簡易チャートです。より詳しい期間指定やRSI等は「📊 メインダッシュボード」の「🕯️ 個別チャート」タブでご覧いただけます。")
+
+    dc1, dc2 = st.columns(2)
+    with dc1:
+        st.metric("52週レンジ", f"位置 {range_pos:.0f}%" if range_pos is not None else "―", help=glossary_help("52週レンジ"))
+    with dc2:
+        if margin and margin.get("buy_balance") is not None:
+            trend_note = {"increasing": "（増加）", "decreasing": "（減少）", "flat": "（横ばい）"}.get(margin.get("trend"), "")
+            st.metric("信用買い残", f"{margin['buy_balance']:,.0f}株{trend_note}", help=glossary_help("信用倍率"))
+        else:
+            st.metric("信用買い残", "―", help=glossary_help("信用倍率"))
+
+    st.markdown("**📝 直近の動きまとめ**")
+    st.caption(_build_lowprice_summary(r, margin, range_pos, period_choice))
+    st.caption("※ 上記はトレンド確立度・初動の信頼度・仕手株判定などの指標を機械的に文章化した自動要約です。生成AIによる分析ではなく、投資判断の根拠として断定的に用いないでください。")
+
+
+def render_lowprice_page(period_choice: str, start_date: dt.date, end_date: dt.date):
+    """低位株・無名株分析ページ本体。メインダッシュボードとは別の候補リスト（lowprice_stocks.csv）を対象に、
+    株価上限などで絞り込んだうえで、メインダッシュボードと同じ指標・カードUIで一覧表示する。"""
+    st.markdown(
+        """
+        <div class="app-header">
+            <h1>🔍 低位株・無名株分析</h1>
+            <p>株価が低い・知名度がまだ高くない東証銘柄の候補リストです。メインダッシュボードと同じ指標（トレンド確立度・出来高・信用残など）で確認できます。</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "掲載銘柄は、Yahoo!ファイナンスの「単元株価格下位」「時価総額下位」ランキング（2026年8月時点）を基に、"
+        "時価総額が極端に小さい銘柄（目安として時価総額10億円未満）や、臨床段階で製品売上のないバイオベンチャーなど"
+        "事業実態の判断が難しい銘柄を除いて選んだ候補リストです。株価が低い銘柄は値動きが大きくなりやすく、"
+        "出来高が少ない銘柄も含まれるため、下記のバッジや指標を確認したうえでご自身で判断してください。"
+    )
+
+    lowprice_master = load_master(LOWPRICE_CSV)
+    today_local = dt.date.today()
+
+    st.markdown("### 🔧 絞り込み条件")
+    lc1, lc2 = st.columns(2)
+    with lc1:
+        price_max = st.slider(
+            "株価 上限（円）", min_value=50, max_value=3000, value=1000, step=50,
+            help="この株価以下の銘柄のみ表示します（初期値: 1,000円未満の「低位株」の目安）。",
+        )
+    with lc2:
+        sectors_lp = sorted(lowprice_master["sector"].unique().tolist())
+        selected_sectors_lp = st.multiselect("業種で絞り込み（未選択時は全業種）", sectors_lp)
+
+    target_df = (
+        lowprice_master if not selected_sectors_lp
+        else lowprice_master[lowprice_master["sector"].isin(selected_sectors_lp)]
+    )
+    codes_lp = target_df["code"].tolist()
+
+    if not codes_lp:
+        st.info("条件に一致する銘柄がありません。")
+        return
+
+    rows_lp = []
+    with st.spinner(f"低位株・無名株 {len(codes_lp)}銘柄のデータを取得中です…"):
+        for code in codes_lp:
+            name = target_df.loc[target_df["code"] == code, "name"].values[0]
+            sector = target_df.loc[target_df["code"] == code, "sector"].values[0]
+            hist = fetch_history(code, start_date, end_date)
+            pct, base_p, latest_p = pct_change_over_period(hist, start_date, end_date)
+            fundamentals = fetch_fundamentals(code)
+            avg_volume, avg_value = compute_liquidity(hist)
+            spec_level, spec_reason = detect_speculative_signal(code)
+            trend_status = compute_trend_status(code)
+            entry_quality = compute_entry_quality(code)
+            rows_lp.append({
+                "code": code,
+                "name": name,
+                "sector": sector,
+                "pct": round(pct, 2) if pct is not None else None,
+                "base_p": round(base_p, 1) if base_p is not None else None,
+                "latest_p": round(latest_p, 1) if latest_p is not None else None,
+                "per": fundamentals.get("per"),
+                "pbr": fundamentals.get("pbr"),
+                "dividend_yield": fundamentals.get("dividend_yield"),
+                "market_cap": fundamentals.get("market_cap"),
+                "avg_volume": avg_volume,
+                "avg_value": avg_value,
+                "is_thin": (avg_value is not None) and (avg_value < LIQUIDITY_THIN_THRESHOLD),
+                "spec_level": spec_level,
+                "spec_reason": spec_reason,
+                "trend_status": trend_status,
+                "entry_quality": entry_quality,
+            })
+
+    df_lp = pd.DataFrame(rows_lp)
+    df_lp = df_lp[df_lp["latest_p"].apply(lambda v: pd.notna(v) and v <= price_max)]
+    df_lp = df_lp.sort_values("pct", ascending=False, na_position="last")
+
+    if df_lp.empty:
+        st.warning("条件に一致する銘柄がありませんでした（株価が取得できなかった銘柄を含みます）。上限株価を上げてみてください。")
+        return
+
+    st.caption(f"表示中: {len(df_lp)} / {len(codes_lp)} 銘柄（株価{price_max:,}円以下）")
+
+    for _, r in df_lp.iterrows():
+        color = pct_color(r["pct"])
+        arrow = pct_arrow(r["pct"])
+        pct_text = f"{r['pct']:+.2f}%" if pd.notna(r["pct"]) else "取得できません"
+        price_text = f"{r['base_p']:.1f}円 → {r['latest_p']:.1f}円" if pd.notna(r["base_p"]) else ""
+        yahoo_url = f"https://finance.yahoo.co.jp/quote/{r['code']}.T"
+
+        per_text = format_ratio(r["per"])
+        pbr_text = format_ratio(r["pbr"])
+        dy_text = format_dividend_yield(r["dividend_yield"])
+        mcap_text = format_market_cap(r["market_cap"])
+        vol_text = format_trading_value(r["avg_value"])
+        thin_badge = (
+            f'<span class="badge badge-thin" title="{GLOSSARY["出来高"]}">⚠ 薄商い</span>'
+            if r["is_thin"] else ""
+        )
+        if r["spec_level"] == "warning":
+            spec_tooltip = f"{r['spec_reason']}。{GLOSSARY['仕手株疑い']}"
+            spec_badge = f'<span class="badge badge-spec" title="{spec_tooltip}">🚨 仕手株疑い</span>'
+        elif r["spec_level"] == "attention":
+            spec_tooltip = f"{r['spec_reason']}。{GLOSSARY['出来高急増（注目）']}"
+            spec_badge = f'<span class="badge badge-attention" title="{spec_tooltip}">👀 注目</span>'
+        else:
+            spec_badge = ""
+
+        trend = r["trend_status"]
+        if trend and trend.get("structure") == "perfect_order":
+            dev_txt = f"{trend['dev25']:+.1f}%" if trend.get("dev25") is not None else "―"
+            extended_note = "（伸びすぎ注意）" if trend.get("extended") else ""
+            trend_tooltip = f"25日線乖離率 {dev_txt}{extended_note}。{GLOSSARY['トレンド確立度']}"
+            trend_badge = f'<span class="badge badge-trend-ok" title="{trend_tooltip}">📈 トレンド確立 {dev_txt}</span>'
+        elif trend:
+            trend_badge = f'<span class="badge badge-trend-none" title="{GLOSSARY["トレンド確立度"]}">🌱 未確立</span>'
+        else:
+            trend_badge = ""
+
+        eq = r["entry_quality"]
+        if eq and eq.get("bullish") and eq.get("reliable") is True:
+            entry_badge = f'<span class="badge badge-entry-good" title="{GLOSSARY["初動の信頼度"]}">✅ 出来高を伴う陽線</span>'
+        elif eq and eq.get("bullish") and eq.get("reliable") is False:
+            entry_badge = f'<span class="badge badge-entry-bad" title="{GLOSSARY["初動の信頼度"]}">⚠ だまし初動の可能性</span>'
+        else:
+            entry_badge = ""
+
+        render_html(
+            f"""
+            <div class="stock-card">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div>
+                        <span class="name">{r['name']}</span>
+                        <span class="code">{r['code']}</span>
+                        <div class="price">{price_text}</div>
+                        <a class="yahoo-link" href="{yahoo_url}" target="_blank" rel="noopener noreferrer">Yahoo!ファイナンスで見る →</a>
+                    </div>
+                    <div style="text-align:right;">
+                        <div class="pct" style="color:{color};">{arrow} {pct_text}</div>
+                        <span class="badge badge-none">🏷 {r['sector']}</span>
+                        {thin_badge}
+                        {spec_badge}
+                        {trend_badge}
+                        {entry_badge}
+                    </div>
+                </div>
+                <div class="fundamentals-row">
+                    <span title="{GLOSSARY['PER']}">PER {per_text}</span>
+                    <span title="{GLOSSARY['PBR']}">PBR {pbr_text}</span>
+                    <span title="{GLOSSARY['配当利回り']}">配当利回り {dy_text}</span>
+                    <span title="{GLOSSARY['時価総額']}">時価総額 {mcap_text}</span>
+                    <span title="{GLOSSARY['出来高']}">出来高 {vol_text}</span>
+                </div>
+            </div>
+            """
+        )
+
+        detail_key = f"lowprice_detail_{r['code']}"
+        if detail_key not in st.session_state:
+            st.session_state[detail_key] = False
+        toggle_label = "📉 詳細を閉じる" if st.session_state[detail_key] else "📊 詳しく見る（チャート・分析）"
+        if st.button(toggle_label, key=f"lowprice_detail_btn_{r['code']}", use_container_width=True):
+            st.session_state[detail_key] = not st.session_state[detail_key]
+            st.rerun()
+
+        if st.session_state[detail_key]:
+            with st.container(border=True):
+                _render_lowprice_detail(r["code"], r["name"], r, period_choice, today_local)
+
+        st.markdown("")
+
+    st.caption("👈 メインダッシュボードに戻るには、左のサイドバーの「表示するページ」を切り替えてください。")
+
+
+# ---------------------------------------------------------------------------
 # 画面構築
 # ---------------------------------------------------------------------------
 inject_style()
@@ -1553,6 +1836,17 @@ with st.sidebar.expander("⭐ グループを管理"):
             st.success("グループを削除しました。")
             st.rerun()
     st.caption("⚠️ グループ情報はアプリのサーバーに保存されます。今後アプリの機能追加・修正で更新すると、リセットされる場合があります。")
+
+st.sidebar.markdown("---")
+page_mode = st.sidebar.radio(
+    "📂 表示するページ",
+    ["📊 メインダッシュボード", "🔍 低位株・無名株分析"],
+    key="page_mode_select",
+)
+
+if page_mode == "🔍 低位株・無名株分析":
+    render_lowprice_page(period_choice, start_date, end_date)
+    st.stop()
 
 # ---------------------------------------------------------------------------
 # 市場ダッシュボード（選択中の期間に連動）
@@ -2084,9 +2378,9 @@ with tab2:
                 if trend_focus.get("structure") == "perfect_order":
                     dev_txt = f"{trend_focus['dev25']:+.1f}%" if trend_focus.get("dev25") is not None else "―"
                     extended_note = "（伸びすぎ注意）" if trend_focus.get("extended") else ""
-                    st.metric("トレンド確立度", f"📈 確立 {dev_txt}{extended_note}", help=glossary_help("トレンド確立度", "25日線乖離率"))
+                    st.metric("トレンド確立度", f"📈 確立 {dev_txt}{extended_note}", help=glossary_help("トレンド確立度", "25日線かい離率"))
                 else:
-                    st.metric("トレンド確立度", "🌱 未確立（反発初期の可能性）", help=glossary_help("トレンド確立度", "25日線乖離率"))
+                    st.metric("トレンド確立度", "🌱 未確立（反発初期の可能性）", help=glossary_help("トレンド確立度", "25日線かい離率"))
             else:
                 st.metric("トレンド確立度", "―", help=glossary_help("トレンド確立度"))
             st.caption(f"基準: MA5>MA25>MA75の並びで「確立」／25日線かい離+{TREND_EXTENDED_DEV_THRESHOLD:.0f}%以上で伸びすぎ注意")
