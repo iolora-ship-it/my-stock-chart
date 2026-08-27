@@ -48,6 +48,11 @@ STOCKS_CSV = "stocks.csv"
 LOWPRICE_CSV = "lowprice_stocks.csv"
 GROUPS_FILE = "groups.json"
 PORTFOLIO_FILE = "portfolio.json"
+TRADES_FILE = "trades.json"
+RULE_FILE = "entry_rule.json"
+
+# 「勢いだけで飛びつき買い」を警告する基準（トレンド未確立なのに一定以上上昇している場合に警告）
+CHASING_PCT_THRESHOLD = 8.0  # 選択期間のトータル騰落率がこれ以上（%）で、かつトレンド未確立なら警告
 
 # 1日あたりの平均売買代金がこれを下回る銘柄は「薄商い」として注意バッジを表示する
 # （出来高が極端に少ない銘柄は、株価データが実勢を反映していない・更新が古いことがあるため）
@@ -113,8 +118,19 @@ GLOSSARY = {
     "信用倍率": (
         "信用取引で「買い建て（信用買い）」している株数と「売り建て（空売り）」している株数の比率（信用買い残 ÷ 信用売り残）です。"
         "信用買い残は将来いずれ反対売買（返済売り）される「将来の売り圧力」、信用売り残は将来の買い戻し（＝将来の買い圧力）とみなされます。"
-        "信用買い残が積み上がっている（倍率が高い）ほど、株価が伸び悩んだ際に期日を迎えた信用買いの投を売りが出やすく、上値を抑える要因になり得ます。"
+        "信用買い残が積み上がっている（倍率が高い）ほど、株価が伸び悩んだ際に期日を迎えた信用買いの投げ売りが出やすく、上値を抑える要因になり得ます。"
         "逆に信用売り残が多い（倍率が低い）場合は、将来の買い戻し需要が相対的に大きいと考えられます。週次データのため直近の急な変化は反映されません。"
+    ),
+    "エントリールール": (
+        "「トレンド確立度が確立していること」「初動の信頼度が✅であること」など、"
+        "自分で事前に決めた買ってよい条件をサイドバーの「🎯 エントリールール設定」で登録できます。"
+        "登録した条件を満たす銘柄には🎯 ルール適合、満たさない銘柄には🚫 ルール未達（理由）が表示されます。"
+        "感覚ではなく、事前に決めたルール通りに判断できているかを振り返るための目安として使ってください。"
+    ),
+    "飛びつき買い警告": (
+        "直近で値上がりしているものの、移動平均線によるトレンド確立や、出来高を伴う初動の裏付けが"
+        "まだ弱い銘柄に表示される注意喚起です。値動きの勢いだけを見て高値で買ってしまう"
+        "（いわゆる「飛びつき買い・高値づかみ」）を避けるための目安であり、絶対に買ってはいけないという意味ではありません。"
     ),
 }
 
@@ -473,6 +489,22 @@ def inject_style():
             color: #c0392b;
             margin-left: 6px;
         }
+        .stock-card .badge-chasing {
+            background: #ffe1d6;
+            color: #b8390e;
+            margin-left: 6px;
+            animation: fadeInUp 0.4s ease;
+        }
+        .stock-card .badge-rule-ok {
+            background: #eaf3ff;
+            color: #0b5cad;
+            margin-left: 6px;
+        }
+        .stock-card .badge-rule-fail {
+            background: #f1f2f4;
+            color: #6b7280;
+            margin-left: 6px;
+        }
         .stock-card .fundamentals-row {
             margin-top: 10px;
             padding-top: 10px;
@@ -607,7 +639,10 @@ def inject_style():
             .stock-card .badge-trend-ok,
             .stock-card .badge-trend-none,
             .stock-card .badge-entry-good,
-            .stock-card .badge-entry-bad {
+            .stock-card .badge-entry-bad,
+            .stock-card .badge-chasing,
+            .stock-card .badge-rule-ok,
+            .stock-card .badge-rule-fail {
                 margin-left: 0;
                 margin-right: 6px;
             }
@@ -1310,6 +1345,94 @@ def save_portfolio(holdings: list):
         pass
 
 
+# ---------------------------------------------------------------------------
+# エントリールール（自分で決めた買ってよい条件）の読み書きと判定
+# ---------------------------------------------------------------------------
+def load_entry_rule() -> dict:
+    """自分で設定した「買ってよい条件」を読み込む。
+    require_trend: トレンド確立度が「確立」であることを必須にするか
+    require_entry: 初動の信頼度が✅であることを必須にするか"""
+    default = {"require_trend": False, "require_entry": False}
+    if os.path.exists(RULE_FILE):
+        try:
+            with open(RULE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return {**default, **data}
+        except Exception:
+            return default
+    return default
+
+
+def save_entry_rule(rule: dict):
+    try:
+        with open(RULE_FILE, "w", encoding="utf-8") as f:
+            json.dump(rule, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def evaluate_entry_rule(trend, eq, rule: dict):
+    """設定したエントリールールに対して、銘柄が条件を満たすか判定する。
+    戻り値: (status, reasons)
+      status: "pass"（条件を満たす）/ "fail"（満たさない）/ None（ルール未設定）
+      reasons: 満たしていない条件のリスト（statusが"fail"のときのみ中身がある）"""
+    if not rule.get("require_trend") and not rule.get("require_entry"):
+        return None, []
+    reasons = []
+    if rule.get("require_trend"):
+        trend_ok = bool(trend and trend.get("structure") == "perfect_order")
+        if not trend_ok:
+            reasons.append("トレンド未確立")
+    if rule.get("require_entry"):
+        entry_ok = bool(eq and eq.get("bullish") and eq.get("reliable") is True)
+        if not entry_ok:
+            reasons.append("初動の信頼度が条件未達")
+    return ("fail" if reasons else "pass"), reasons
+
+
+def check_chasing_risk(pct, trend, eq) -> str:
+    """直近の値動きに対して、トレンド確立や初動の裏付けが弱いまま値上がりを追いかけていないか
+    （飛びつき買い・高値づかみのリスク）を判定し、警告文を返す。問題なければ空文字列を返す。"""
+    if eq and eq.get("bullish") and eq.get("reliable") is False:
+        return (
+            "直近1営業日の陽線は、出来高や終値位置などの条件を満たさない「だまし初動」の可能性があります。"
+            "勢いだけで飛びつくと高値づかみになりやすいので注意してください。"
+        )
+    trend_ok = bool(trend and trend.get("structure") == "perfect_order")
+    if (not trend_ok) and (pct is not None and pct >= CHASING_PCT_THRESHOLD):
+        return (
+            f"選択期間で{pct:+.1f}%値上がりしていますが、移動平均線ではまだトレンド確立に至っていません。"
+            "急な値上がりを追いかけて高値で買ってしまうリスクに注意してください。"
+        )
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# 売買記録（トレードジャーナル）の読み書き
+# ---------------------------------------------------------------------------
+def load_trades() -> list:
+    """売買記録のリストを読み込む。各要素は
+    {id, date, code, name, side("買い"/"売り"), price, shares, reason}"""
+    if os.path.exists(TRADES_FILE):
+        try:
+            with open(TRADES_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+        except Exception:
+            return []
+    return []
+
+
+def save_trades(trades: list):
+    try:
+        with open(TRADES_FILE, "w", encoding="utf-8") as f:
+            json.dump(trades, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
 def get_latest_price(code: str):
     """ポートフォリオの評価額計算用に、直近の終値を1件だけ取得する"""
     hist = fetch_history(code, dt.date.today() - dt.timedelta(days=14), dt.date.today())
@@ -1369,6 +1492,11 @@ def _build_lowprice_summary(r: dict, margin, range_pos, period_choice: str) -> s
 def _render_lowprice_detail(code: str, name: str, r: dict, period_choice: str, today_local: dt.date):
     """低位株ページのカードをワンクリックで開いたときに表示する簡易詳細
     （ミニチャート＋主要指標＋自動要約）。"""
+
+    chasing_msg = check_chasing_risk(r.get("pct"), r.get("trend_status"), r.get("entry_quality"))
+    if chasing_msg:
+        st.warning(f"🚨 飛びつき買い注意: {chasing_msg}")
+
     chart_start = today_local - dt.timedelta(days=90)
     ma_buffer_start = chart_start - dt.timedelta(days=160)
     hist_ext = fetch_history(code, ma_buffer_start, today_local)
@@ -1553,6 +1681,21 @@ def render_lowprice_page(period_choice: str, start_date: dt.date, end_date: dt.d
         else:
             entry_badge = ""
 
+        chasing_msg = check_chasing_risk(r["pct"], r["trend_status"], r["entry_quality"])
+        chasing_badge = (
+            f'<span class="badge badge-chasing" title="{GLOSSARY["飛びつき買い警告"]}">🚨 飛びつき注意</span>'
+            if chasing_msg else ""
+        )
+
+        rule_status, rule_reasons = evaluate_entry_rule(r["trend_status"], r["entry_quality"], entry_rule)
+        if rule_status == "pass":
+            rule_badge = f'<span class="badge badge-rule-ok" title="{glossary_help("エントリールール")}">🎯 ルール適合</span>'
+        elif rule_status == "fail":
+            reason_txt = "・".join(rule_reasons)
+            rule_badge = f'<span class="badge badge-rule-fail" title="未達: {reason_txt}。{glossary_help("エントリールール")}">🚫 ルール未達（{reason_txt}）</span>'
+        else:
+            rule_badge = ""
+
         render_html(
             f"""
             <div class="stock-card">
@@ -1570,6 +1713,8 @@ def render_lowprice_page(period_choice: str, start_date: dt.date, end_date: dt.d
                         {spec_badge}
                         {trend_badge}
                         {entry_badge}
+                        {chasing_badge}
+                        {rule_badge}
                     </div>
                 </div>
                 <div class="fundamentals-row">
@@ -1838,6 +1983,34 @@ with st.sidebar.expander("⭐ グループを管理"):
     st.caption("⚠️ グループ情報はアプリのサーバーに保存されます。今後アプリの機能追加・修正で更新すると、リセットされる場合があります。")
 
 st.sidebar.markdown("---")
+with st.sidebar.expander("🎯 エントリールール設定"):
+    st.caption(
+        "「なんとなく上がりそうだから買う」を減らすために、自分で買ってよい条件を決めておけます。"
+        "設定すると、各銘柄カードに条件を満たしているか（🎯 ルール適合 / 🚫 ルール未達）が表示されます。"
+    )
+    entry_rule = load_entry_rule()
+    rule_require_trend = st.checkbox(
+        "トレンド確立度が「確立」の銘柄だけを対象にする",
+        value=entry_rule.get("require_trend", False),
+        help=glossary_help("トレンド確立度"),
+        key="rule_require_trend",
+    )
+    rule_require_entry = st.checkbox(
+        "初動の信頼度が「✅」の銘柄だけを対象にする",
+        value=entry_rule.get("require_entry", False),
+        help=glossary_help("初動の信頼度"),
+        key="rule_require_entry",
+    )
+    new_rule = {"require_trend": rule_require_trend, "require_entry": rule_require_entry}
+    if new_rule != entry_rule:
+        save_entry_rule(new_rule)
+        entry_rule = new_rule
+        st.rerun()
+    if not rule_require_trend and not rule_require_entry:
+        st.caption("条件を1つ以上オンにすると、判定が有効になります。")
+    st.caption("⚠️ この設定はアプリのサーバーに保存されます。判定はあくまで機械的な目安であり、必ず守るべきルールを提案するものではありません。")
+
+st.sidebar.markdown("---")
 page_mode = st.sidebar.radio(
     "📂 表示するページ",
     ["📊 メインダッシュボード", "🔍 低位株・無名株分析"],
@@ -1870,7 +2043,7 @@ st.caption(f"📅 上の指標は選択中の期間「{period_choice}」での�
 st.markdown("")
 
 # ---------------------------------------------------------------------------
-# セクターの勢い（上位・下位） — トップページのハイライト
+# セクターの勢い（上位・下位）— トップページのハイライト
 # ---------------------------------------------------------------------------
 st.markdown("### 🔥 セクターの勢い")
 st.caption(f"各セクターの代表銘柄をもとにした、期間「{period_choice}」の平均騰落率ランキングです。")
@@ -2027,6 +2200,11 @@ def render_quick_detail(code: str, name: str, r: dict):
     """タブ1のカードをワンクリックで開いたときに表示する簡易詳細
     （ミニチャート＋主要指標＋自動要約）。個別チャートタブほど多機能ではないが、
     セクター比較の一覧を見たまま、その場でざっと値動きを確認できるようにする。"""
+
+    chasing_msg = check_chasing_risk(r.get("pct"), r.get("trend_status"), r.get("entry_quality"))
+    if chasing_msg:
+        st.warning(f"🚨 飛びつき買い注意: {chasing_msg}")
+
     chart_start = today - dt.timedelta(days=90)
     ma_buffer_start = chart_start - dt.timedelta(days=160)
     hist_ext = fetch_history(code, ma_buffer_start, today)
@@ -2091,8 +2269,8 @@ def render_quick_detail(code: str, name: str, r: dict):
     st.caption("※ 上記はトレンド確立度・初動の信頼度・仕手株判定などの指標を機械的に文章化した自動要約です。生成AIによる分析ではなく、投資判断の根拠として断定的に用いないでください。")
 
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["📊 セクター比較", "🕯️ 個別チャート", "🗓️ 決算カレンダー", "💼 ポートフォリオ", "🌍 市場概況"]
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+    ["📊 セクター比較", "🕯️ 個別チャート", "🗓️ 決算カレンダー", "💼 ポートフォリオ", "🌍 市場概況", "📝 売買記録"]
 )
 
 # --- タブ1: セクター比較 ---------------------------------------------------
@@ -2221,6 +2399,21 @@ with tab1:
         else:
             entry_badge = ""
 
+        chasing_msg = check_chasing_risk(r["pct"], r["trend_status"], r["entry_quality"])
+        chasing_badge = (
+            f'<span class="badge badge-chasing" title="{GLOSSARY["飛びつき買い警告"]}">🚨 飛びつき注意</span>'
+            if chasing_msg else ""
+        )
+
+        rule_status, rule_reasons = evaluate_entry_rule(r["trend_status"], r["entry_quality"], entry_rule)
+        if rule_status == "pass":
+            rule_badge = f'<span class="badge badge-rule-ok" title="{glossary_help("エントリールール")}">🎯 ルール適合</span>'
+        elif rule_status == "fail":
+            reason_txt = "・".join(rule_reasons)
+            rule_badge = f'<span class="badge badge-rule-fail" title="未達: {reason_txt}。{glossary_help("エントリールール")}">🚫 ルール未達（{reason_txt}）</span>'
+        else:
+            rule_badge = ""
+
         render_html(
             f"""
             <div class="stock-card">
@@ -2238,6 +2431,8 @@ with tab1:
                         {spec_badge}
                         {trend_badge}
                         {entry_badge}
+                        {chasing_badge}
+                        {rule_badge}
                     </div>
                 </div>
                 <div class="fundamentals-row">
@@ -2378,9 +2573,9 @@ with tab2:
                 if trend_focus.get("structure") == "perfect_order":
                     dev_txt = f"{trend_focus['dev25']:+.1f}%" if trend_focus.get("dev25") is not None else "―"
                     extended_note = "（伸びすぎ注意）" if trend_focus.get("extended") else ""
-                    st.metric("トレンド確立度", f"📈 確立 {dev_txt}{extended_note}", help=glossary_help("トレンド確立度", "25日線かい離率"))
+                    st.metric("トレンド確立度", f"📈 確立 {dev_txt}{extended_note}", help=glossary_help("トレンド確立度", "25日線乖離率"))
                 else:
-                    st.metric("トレンド確立度", "🌱 未確立（反発初期の可能性）", help=glossary_help("トレンド確立度", "25日線かい離率"))
+                    st.metric("トレンド確立度", "🌱 未確立（反発初期の可能性）", help=glossary_help("トレンド確立度", "25日線乖離率"))
             else:
                 st.metric("トレンド確立度", "―", help=glossary_help("トレンド確立度"))
             st.caption(f"基準: MA5>MA25>MA75の並びで「確立」／25日線かい離+{TREND_EXTENDED_DEV_THRESHOLD:.0f}%以上で伸びすぎ注意")
@@ -2836,3 +3031,156 @@ with tab5:
         ).copy()
         display_ranking["平均騰落率(%)"] = display_ranking["平均騰落率(%)"].map(lambda v: f"{v:+.2f}")
         st.dataframe(display_ranking, use_container_width=True, hide_index=True)
+
+
+# --- タブ6: 売買記録（トレードジャーナル） ---------------------------------
+with tab6:
+    st.caption(
+        "実際の売買を記録して、後から振り返るための機能です。"
+        "「買った理由」「売った理由」を書き残しておくと、勝ちパターン・負けパターンが感覚ではなく記録として見えてきます。"
+    )
+
+    if "trades" not in st.session_state:
+        st.session_state["trades"] = load_trades()
+    trades = st.session_state["trades"]
+
+    with st.expander("➕ 売買を記録する", expanded=len(trades) == 0):
+        all_labels_tj = (master["code"] + " " + master["name"]).tolist()
+        tj_label = st.selectbox("銘柄", options=["選択してください"] + all_labels_tj, key="tj_select")
+        tj_c1, tj_c2 = st.columns(2)
+        with tj_c1:
+            tj_side = st.radio("売買区分", ["買い", "売り"], horizontal=True, key="tj_side")
+        with tj_c2:
+            tj_date = st.date_input("日付", value=dt.date.today(), key="tj_date")
+        tj_c3, tj_c4 = st.columns(2)
+        with tj_c3:
+            tj_price = st.number_input("価格（1株あたり・円）", min_value=0.0, step=1.0, value=0.0, key="tj_price")
+        with tj_c4:
+            tj_shares = st.number_input("株数", min_value=0, step=100, value=100, key="tj_shares")
+        tj_reason = st.text_area(
+            "理由・当時の考え（任意）",
+            placeholder="例: チャート的にもう少し上がりそうだったから／トレンド確立を確認できたから　など",
+            key="tj_reason",
+        )
+        if st.button("記録する", key="tj_add_btn"):
+            if tj_label == "選択してください":
+                st.warning("銘柄を選択してください。")
+            elif tj_price <= 0 or tj_shares <= 0:
+                st.warning("価格・株数はいずれも0より大きい値を入力してください。")
+            else:
+                tj_code = tj_label.split(" ")[0]
+                tj_name = master.loc[master["code"] == tj_code, "name"].values[0]
+                trades.append(
+                    {
+                        "id": str(uuid.uuid4()),
+                        "date": str(tj_date),
+                        "code": tj_code,
+                        "name": tj_name,
+                        "side": tj_side,
+                        "price": tj_price,
+                        "shares": tj_shares,
+                        "reason": tj_reason.strip(),
+                    }
+                )
+                save_trades(trades)
+                st.success(f"「{tj_name}」の{tj_side}記録を追加しました。")
+                st.rerun()
+
+    if not trades:
+        st.info("まだ売買記録がありません。上の「➕ 売買を記録する」から記録してみてください。")
+    else:
+        # 銘柄ごとに買い→売りをペアリングして損益を計算する（先入れ先出し、株数はペアの最小値ぶんずつ消化する）
+        by_code = {}
+        for t in trades:
+            by_code.setdefault(t["code"], []).append(t)
+
+        closed_trades = []
+        for code, items in by_code.items():
+            items_sorted = sorted(items, key=lambda x: x["date"])
+            buys = [dict(t) for t in items_sorted if t["side"] == "買い"]
+            sells = [dict(t) for t in items_sorted if t["side"] == "売り"]
+            buy_queue = buys
+            for sell in sells:
+                remaining = sell["shares"]
+                while remaining > 0 and buy_queue:
+                    b = buy_queue[0]
+                    matched = min(remaining, b["shares"])
+                    pl = (sell["price"] - b["price"]) * matched
+                    pl_pct = (sell["price"] - b["price"]) / b["price"] * 100 if b["price"] > 0 else None
+                    closed_trades.append(
+                        {
+                            "name": sell["name"],
+                            "code": code,
+                            "buy_date": b["date"],
+                            "sell_date": sell["date"],
+                            "shares": matched,
+                            "buy_price": b["price"],
+                            "sell_price": sell["price"],
+                            "pl": pl,
+                            "pl_pct": pl_pct,
+                            "reason": b.get("reason", ""),
+                        }
+                    )
+                    b["shares"] -= matched
+                    remaining -= matched
+                    if b["shares"] <= 0:
+                        buy_queue.pop(0)
+
+        if closed_trades:
+            st.markdown("#### 📊 これまでの成績（決済済み分）")
+            win_trades = [t for t in closed_trades if t["pl"] > 0]
+            lose_trades = [t for t in closed_trades if t["pl"] < 0]
+            win_rate = len(win_trades) / len(closed_trades) * 100 if closed_trades else None
+            total_pl = sum(t["pl"] for t in closed_trades)
+            avg_win = sum(t["pl"] for t in win_trades) / len(win_trades) if win_trades else None
+            avg_lose = sum(t["pl"] for t in lose_trades) / len(lose_trades) if lose_trades else None
+
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            sc1.metric("決済回数", f"{len(closed_trades)}回")
+            sc2.metric("勝率", f"{win_rate:.0f}%" if win_rate is not None else "―")
+            sc3.metric("損益合計", f"{total_pl:+,.0f}円")
+            sc4.metric(
+                "平均利益 / 平均損失",
+                f"{avg_win:+,.0f}円 / {avg_lose:+,.0f}円" if (avg_win is not None and avg_lose is not None) else "―",
+            )
+            if win_rate is not None and win_rate < 50 and total_pl < 0:
+                st.caption(
+                    "💡 勝率も損益合計もマイナス傾向のときは、サイドバーの「🎯 エントリールール設定」で"
+                    "「トレンド確立度」「初動の信頼度」を必須条件にしてから買うようにすると、"
+                    "記録がどう変わるか試してみる価値があります。"
+                )
+
+            closed_df = pd.DataFrame(closed_trades)
+            display_closed = closed_df.rename(
+                columns={
+                    "name": "銘柄名", "code": "コード", "buy_date": "買った日", "sell_date": "売った日",
+                    "shares": "株数", "buy_price": "買値", "sell_price": "売値",
+                    "pl": "損益(円)", "pl_pct": "損益率(%)", "reason": "買った理由",
+                }
+            ).copy()
+            display_closed["損益(円)"] = display_closed["損益(円)"].map(lambda v: f"{v:+,.0f}")
+            display_closed["損益率(%)"] = display_closed["損益率(%)"].map(lambda v: f"{v:+.2f}" if pd.notna(v) else "―")
+            st.dataframe(display_closed, use_container_width=True, hide_index=True)
+        else:
+            st.caption("まだ決済済み（買って売った）の記録がありません。買い・売りの両方を記録すると、ここに成績が表示されます。")
+
+        st.markdown("#### 📋 記録一覧（すべて）")
+        all_df = pd.DataFrame(trades)
+        display_all = all_df.rename(
+            columns={
+                "date": "日付", "code": "コード", "name": "銘柄名", "side": "区分",
+                "price": "価格", "shares": "株数", "reason": "理由",
+            }
+        )[["日付", "コード", "銘柄名", "区分", "価格", "株数", "理由"]]
+        st.dataframe(display_all, use_container_width=True, hide_index=True)
+
+        del_labels_tj = [f"{t['date']} {t['name']} {t['side']} {t['price']}円×{t['shares']}株" for t in trades]
+        del_target_tj = st.selectbox("削除する記録", ["選択なし"] + del_labels_tj, key="tj_del_select")
+        if del_target_tj != "選択なし" and st.button("この記録を削除", key="tj_del_btn"):
+            del_idx = del_labels_tj.index(del_target_tj)
+            del st.session_state["trades"][del_idx]
+            save_trades(st.session_state["trades"])
+            st.success("削除しました。")
+            st.rerun()
+
+    st.caption("⚠️ 売買記録はアプリのサーバーに保存されます。今後アプリの機能追加・修正で更新すると、リセットされる場合があります。損益はここに入力した価格・株数から単純計算したものであり、手数料・税金等は考慮していません。")
