@@ -1471,6 +1471,10 @@ def render_rule_matched_page(entry_rule: dict, period_choice: str, start_date: d
     if entry_rule.get("require_entry"):
         conditions.append("初動の信頼度が「✅」")
     st.caption(f"現在の条件: {' かつ '.join(conditions)}（騰落率の期間: {period_choice}）")
+    st.caption(
+        f"📏 「トレンド確立度」の判定基準: 移動平均線がMA5>MA25>MA75の順に並ぶこと"
+        f"（25日線かい離+{TREND_EXTENDED_DEV_THRESHOLD:.0f}%以上で伸びすぎ注意）"
+    )
 
     include_lowprice = st.checkbox(
         "低位株・無名株の候補リストも対象に含める",
@@ -1662,6 +1666,10 @@ def render_lowprice_page(period_choice: str, start_date: dt.date, end_date: dt.d
         "時価総額が極端に小さい銘柄（目安として時価総額10億円未満）や、臨床段階で製品売上のないバイオベンチャーなど"
         "事業実態の判断が難しい銘柄を除いて選んだ候補リストです。株価が低い銘柄は値動きが大きくなりやすく、"
         "出来高が少ない銘柄も含まれるため、下記のバッジや指標を確認したうえでご自身で判断してください。"
+    )
+    st.caption(
+        f"📏 「トレンド確立度」の判定基準: 移動平均線がMA5>MA25>MA75の順に並ぶこと"
+        f"（25日線かい離+{TREND_EXTENDED_DEV_THRESHOLD:.0f}%以上で伸びすぎ注意）"
     )
 
     lowprice_master = load_master(LOWPRICE_CSV)
@@ -2081,6 +2089,10 @@ with st.sidebar.expander("🎯 エントリールール設定"):
         "「なんとなく上がりそうだから買う」を減らすために、自分で買ってよい条件を決めておけます。"
         "設定すると、各銘柄カードに条件を満たしているか（🎯 ルール適合 / 🚫 ルール未達）が表示されます。"
     )
+    st.caption(
+        f"📏 「トレンド確立度」の判定基準: 移動平均線がMA5>MA25>MA75の順に並ぶこと"
+        f"（25日線かい離+{TREND_EXTENDED_DEV_THRESHOLD:.0f}%以上で伸びすぎ注意）"
+    )
     entry_rule = load_entry_rule()
     rule_require_trend = st.checkbox(
         "トレンド確立度が「確立」の銘柄だけを対象にする",
@@ -2373,6 +2385,10 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
 # --- タブ1: セクター比較 ---------------------------------------------------
 with tab1:
     st.caption(f"「{selected_sector}」・直近{period_choice}のトータル騰落率")
+    st.caption(
+        f"📏 「トレンド確立度」の判定基準: 移動平均線がMA5>MA25>MA75の順に並ぶこと"
+        f"（25日線かい離+{TREND_EXTENDED_DEV_THRESHOLD:.0f}%以上で伸びすぎ注意）※詳しくは上の「📖 用語集」へ"
+    )
 
     with st.expander("🔎 絞り込み条件（スクリーニング）"):
         f1, f2 = st.columns(2)
@@ -2675,7 +2691,7 @@ with tab2:
                     st.metric("トレンド確立度", "🌱 未確立（反発初期の可能性）", help=glossary_help("トレンド確立度", "25日線乖離率"))
             else:
                 st.metric("トレンド確立度", "―", help=glossary_help("トレンド確立度"))
-            st.caption(f"基準: MA5>MA25>MA75の並びで「確立」／25日線かい離+{TREND_EXTENDED_DEV_THRESHOLD:.0f}%以上で伸びすぎ注意")
+            st.caption(f"📏 判定基準: MA5>MA25>MA75の並びで「確立」／25日線かい離+{TREND_EXTENDED_DEV_THRESHOLD:.0f}%以上で伸びすぎ注意")
         with tc2:
             if entry_focus and entry_focus.get("bullish"):
                 if entry_focus.get("reliable") is True:
@@ -3134,7 +3150,8 @@ with tab5:
 with tab6:
     st.caption(
         "実際の売買を記録して、後から振り返るための機能です。"
-        "「買った理由」「売った理由」を書き残しておくと、勝ちパターン・負けパターンが感覚ではなく記録として見えてきます。"
+        "「買った理由」「売った理由」に加えて「その時の心理状態」も記録しておくと、"
+        "焦って買った取引とそうでない取引で成績にどれくらい差が出ているかを、感覚ではなく記録として確認できます。"
     )
 
     if "trades" not in st.session_state:
@@ -3159,6 +3176,14 @@ with tab6:
             placeholder="例: チャート的にもう少し上がりそうだったから／トレンド確立を確認できたから　など",
             key="tj_reason",
         )
+        tj_mood = st.radio(
+            "買った/売った時の心理状態",
+            ["🙂 落ち着いていた", "😐 普通", "😰 焦っていた"],
+            index=1,
+            horizontal=True,
+            key="tj_mood",
+            help="「焦って買ったら下がった」のような感覚を、あとで記録として振り返れるようにする項目です。",
+        )
         if st.button("記録する", key="tj_add_btn"):
             if tj_label == "選択してください":
                 st.warning("銘柄を選択してください。")
@@ -3177,6 +3202,7 @@ with tab6:
                         "price": tj_price,
                         "shares": tj_shares,
                         "reason": tj_reason.strip(),
+                        "mood": tj_mood,
                     }
                 )
                 save_trades(trades)
@@ -3216,6 +3242,7 @@ with tab6:
                             "pl": pl,
                             "pl_pct": pl_pct,
                             "reason": b.get("reason", ""),
+                            "mood": b.get("mood", "😐 普通"),
                         }
                     )
                     b["shares"] -= matched
@@ -3247,12 +3274,34 @@ with tab6:
                     "記録がどう変わるか試してみる価値があります。"
                 )
 
+            rushed_trades = [t for t in closed_trades if t.get("mood") == "😰 焦っていた"]
+            other_trades = [t for t in closed_trades if t.get("mood") != "😰 焦っていた"]
+            if rushed_trades and other_trades:
+                rushed_win = len([t for t in rushed_trades if t["pl"] > 0]) / len(rushed_trades) * 100
+                rushed_avg_pl = sum(t["pl"] for t in rushed_trades) / len(rushed_trades)
+                other_win = len([t for t in other_trades if t["pl"] > 0]) / len(other_trades) * 100
+                other_avg_pl = sum(t["pl"] for t in other_trades) / len(other_trades)
+                st.markdown("#### 🧠 買った時の心理状態別の成績")
+                mc1, mc2 = st.columns(2)
+                with mc1:
+                    st.metric("😰 焦っていた時の勝率", f"{rushed_win:.0f}%")
+                    st.caption(f"平均損益 {rushed_avg_pl:+,.0f}円/回（{len(rushed_trades)}回）")
+                with mc2:
+                    st.metric("🙂😐 それ以外の勝率", f"{other_win:.0f}%")
+                    st.caption(f"平均損益 {other_avg_pl:+,.0f}円/回（{len(other_trades)}回）")
+                if rushed_avg_pl < other_avg_pl:
+                    st.caption(
+                        "💡 焦って買った取引の方が平均損益が悪い傾向です。「🎯 エントリールール設定」で条件を必須にする、"
+                        "あるいは「🎯 ルール適合銘柄一覧」で条件を満たす銘柄だけを検討するなど、"
+                        "飛びつき買いを減らす工夫を試してみてください。"
+                    )
+
             closed_df = pd.DataFrame(closed_trades)
             display_closed = closed_df.rename(
                 columns={
                     "name": "銘柄名", "code": "コード", "buy_date": "買った日", "sell_date": "売った日",
                     "shares": "株数", "buy_price": "買値", "sell_price": "売値",
-                    "pl": "損益(円)", "pl_pct": "損益率(%)", "reason": "買った理由",
+                    "pl": "損益(円)", "pl_pct": "損益率(%)", "reason": "買った理由", "mood": "買った時の心理",
                 }
             ).copy()
             display_closed["損益(円)"] = display_closed["損益(円)"].map(lambda v: f"{v:+,.0f}")
@@ -3263,12 +3312,15 @@ with tab6:
 
         st.markdown("#### 📋 記録一覧（すべて）")
         all_df = pd.DataFrame(trades)
+        if "mood" not in all_df.columns:
+            all_df["mood"] = "😐 普通"
+        all_df["mood"] = all_df["mood"].fillna("😐 普通")
         display_all = all_df.rename(
             columns={
                 "date": "日付", "code": "コード", "name": "銘柄名", "side": "区分",
-                "price": "価格", "shares": "株数", "reason": "理由",
+                "price": "価格", "shares": "株数", "reason": "理由", "mood": "心理状態",
             }
-        )[["日付", "コード", "銘柄名", "区分", "価格", "株数", "理由"]]
+        )[["日付", "コード", "銘柄名", "区分", "価格", "株数", "心理状態", "理由"]]
         st.dataframe(display_all, use_container_width=True, hide_index=True)
 
         del_labels_tj = [f"{t['date']} {t['name']} {t['side']} {t['price']}円×{t['shares']}株" for t in trades]
