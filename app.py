@@ -1442,6 +1442,99 @@ def get_latest_price(code: str):
 
 
 # ---------------------------------------------------------------------------
+# ルール適合銘柄一覧ページ（エントリールール設定を満たす銘柄を表でまとめて確認する）
+# ---------------------------------------------------------------------------
+def render_rule_matched_page(entry_rule: dict, period_choice: str, start_date: dt.date, end_date: dt.date):
+    """サイドバーの「🎯 エントリールール設定」で決めた条件を満たす銘柄だけを、
+    銘柄ごとのバッジではなく表形式でまとめて確認できるページ。
+    バッジだと銘柄を1つずつ開いて確認する必要があり分かりにくいという声を受けて追加した。"""
+    st.markdown(
+        """
+        <div class="app-header">
+            <h1>🎯 ルール適合銘柄一覧</h1>
+            <p>サイドバーの「🎯 エントリールール設定」で決めた条件を満たす銘柄だけを、表でまとめて確認できます。</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if not entry_rule.get("require_trend") and not entry_rule.get("require_entry"):
+        st.info(
+            "まだエントリールールが設定されていません。左のサイドバーの「🎯 エントリールール設定」を開いて、"
+            "「トレンド確立度」または「初動の信頼度」の条件を1つ以上オンにしてください。"
+        )
+        return
+
+    conditions = []
+    if entry_rule.get("require_trend"):
+        conditions.append("トレンド確立度が「確立」")
+    if entry_rule.get("require_entry"):
+        conditions.append("初動の信頼度が「✅」")
+    st.caption(f"現在の条件: {' かつ '.join(conditions)}（騰落率の期間: {period_choice}）")
+
+    include_lowprice = st.checkbox(
+        "低位株・無名株の候補リストも対象に含める",
+        value=False,
+        help="オンにすると、メインの銘柄リストに加えて低位株ページの候補銘柄も調べます（その分時間がかかります）。",
+    )
+
+    scan_master = master.drop_duplicates(subset="code")
+    if include_lowprice:
+        lowprice_master = load_master(LOWPRICE_CSV)
+        scan_master = pd.concat([scan_master, lowprice_master], ignore_index=True).drop_duplicates(subset="code")
+
+    codes_scan = scan_master["code"].tolist()
+
+    rows_rm = []
+    with st.spinner(f"{len(codes_scan)}銘柄を条件でチェック中…"):
+        for code in codes_scan:
+            trend_status = compute_trend_status(code)
+            entry_quality = compute_entry_quality(code)
+            rule_status, _ = evaluate_entry_rule(trend_status, entry_quality, entry_rule)
+            if rule_status != "pass":
+                continue
+            name = scan_master.loc[scan_master["code"] == code, "name"].values[0]
+            sector = scan_master.loc[scan_master["code"] == code, "sector"].values[0]
+            hist = fetch_history(code, start_date, end_date)
+            pct, base_p, latest_p = pct_change_over_period(hist, start_date, end_date)
+            dev_txt = (
+                f"{trend_status['dev25']:+.1f}%"
+                if trend_status and trend_status.get("dev25") is not None
+                else "―"
+            )
+            rows_rm.append(
+                {
+                    "コード": code,
+                    "銘柄名": name,
+                    "セクター": sector,
+                    "現在値": f"{latest_p:,.1f}円" if latest_p is not None else "―",
+                    f"{period_choice}騰落率": f"{pct:+.2f}%" if pct is not None else "―",
+                    "トレンド確立度": (
+                        f"📈 確立（{dev_txt}）"
+                        if trend_status and trend_status.get("structure") == "perfect_order"
+                        else "―"
+                    ),
+                    "初動の信頼度": "✅" if (entry_quality and entry_quality.get("reliable") is True) else "―",
+                    "Yahoo!ファイナンス": f"https://finance.yahoo.co.jp/quote/{code}.T",
+                }
+            )
+
+    if not rows_rm:
+        st.warning(
+            "現在の条件を満たす銘柄はありませんでした。条件を緩めるか、時間を置いて再度確認してみてください。"
+        )
+        return
+
+    st.caption(f"条件を満たした銘柄: {len(rows_rm)} / {len(codes_scan)} 銘柄")
+    df_rm = pd.DataFrame(rows_rm)
+    st.dataframe(df_rm, use_container_width=True, hide_index=True)
+    st.caption(
+        "※ ここに表示されるのは、設定した機械的な条件を満たしている銘柄というだけで、"
+        "今後の値上がりを保証するものではありません。購入を検討する際は、個別ページの飛びつき買い警告バッジなども合わせてご確認ください。"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 低位株・無名株分析ページ（サイドバーの「グループを管理」下のページ切替から表示）
 # ---------------------------------------------------------------------------
 def _build_lowprice_summary(r: dict, margin, range_pos, period_choice: str) -> str:
@@ -2013,12 +2106,16 @@ with st.sidebar.expander("🎯 エントリールール設定"):
 st.sidebar.markdown("---")
 page_mode = st.sidebar.radio(
     "📂 表示するページ",
-    ["📊 メインダッシュボード", "🔍 低位株・無名株分析"],
+    ["📊 メインダッシュボード", "🔍 低位株・無名株分析", "🎯 ルール適合銘柄一覧"],
     key="page_mode_select",
 )
 
 if page_mode == "🔍 低位株・無名株分析":
     render_lowprice_page(period_choice, start_date, end_date)
+    st.stop()
+
+if page_mode == "🎯 ルール適合銘柄一覧":
+    render_rule_matched_page(entry_rule, period_choice, start_date, end_date)
     st.stop()
 
 # ---------------------------------------------------------------------------
