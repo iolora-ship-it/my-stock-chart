@@ -64,6 +64,17 @@ NEAR_52W_HIGH_PCT = 5.0  # 52週高値からこの%以内（更新も含む）�
 MARGIN_SPIKE_PCT = 15.0  # 信用買い残が前週比でこの%以上増えていたら「急増」バッジを表示
 EDINET_BADGE_LOOKBACK_DAYS = 14  # 一覧バッジ用のEDINETチェック期間（個別チャートページの60日より短くして負荷を抑える）
 
+# 出来高加重移動平均線（VWMA）の計算期間
+VWMA_WINDOW_DAYS = 20
+
+# 「値動きは小さいのに出来高だけ増えている」パターン（機関投資家がバレないように仕込んでいる
+# 可能性がある値動き）を検知する基準
+QUIET_ACCUM_LOOKBACK_DAYS = 5  # この日数の直近平均出来高・値幅をチェック対象にする
+QUIET_ACCUM_BASELINE_DAYS = 21  # 直近の前に置く比較用のベース期間（営業日数）
+QUIET_ACCUM_VOLUME_RATIO = 1.8  # 直近平均出来高がベース期間平均の何倍以上で「増加」とみなすか
+QUIET_ACCUM_PRICE_RANGE_PCT = 6.0  # 直近の値幅（高値-安値）が平均株価に対してこの%以内なら「値動きが小さい」とみなす
+QUIET_ACCUM_MIN_MARKET_CAP = 50_000_000_000  # 時価総額500億円未満は機関投資家が入りにくいため対象外
+
 # 「値動き急変（仕手株リスク）」バッジの判定基準
 SPEC_VOLUME_SPIKE_RATIO = 3.0   # 直近の出来高が、それ以前の平均出来高の何倍以上で急増とみなすか
 SPEC_DAY_PCT_THRESHOLD = 15.0   # 直近1営業日の値動きが何%以上で急変とみなすか
@@ -175,6 +186,21 @@ GLOSSARY = {
     "大量保有報告書 新規あり": (
         f"直近{EDINET_BADGE_LOOKBACK_DAYS}日以内に、5%を超えて保有する大株主の新規報告・変更報告が"
         "EDINETに提出されていることを示すバッジです。詳細は個別チャートページの「🏦 大量保有報告書」で確認できます。"
+    ),
+    "VWMA（出来高加重移動平均線）": (
+        f"直近{VWMA_WINDOW_DAYS}営業日の終値を、その日の出来高で重み付けして平均した線です。"
+        "通常の移動平均線（単純平均）と違い、出来高が多かった日の価格ほど強く反映されるため、"
+        "実際に多くの売買が成立した価格帯に近い水準を示します。"
+        "なお、機関投資家が注文執行の基準としてよく使う「VWAP」は取引開始からその日1日限定の出来高加重平均であり、"
+        f"このVWMAは複数日（{VWMA_WINDOW_DAYS}日）にまたがる移動平均という別の指標である点にご注意ください。"
+    ),
+    "静かな出来高増加": (
+        "値動きはほとんど変わらないのに、出来高だけが普段より増えている状態を示すバッジです。"
+        "機関投資家がマーケットインパクト（自分の注文で株価を動かしてしまうこと）を避けながら、"
+        "気づかれないように少しずつ買い集めている（仕込んでいる）可能性がある値動きとされます。"
+        "「仕手株疑い」バッジとは逆に、値段にまだ現れていない段階の変化を捉えるのが狙いです。"
+        "その後好材料が出て株価が動き出すケースもある一方、単に商いが薄いだけの可能性もあるため、"
+        "あくまで観察対象の目安としてご利用ください（時価総額500億円未満の銘柄は対象外です）。"
     ),
 }
 
@@ -569,7 +595,12 @@ def inject_style():
             color: #3730a3;
             margin-left: 6px;
         }
-        /* 決算間近・52週高値圏・信用倍率急増・大量保有報告書は、判断に直結するバッジと違い
+        .stock-card .badge-quiet-accum {
+            background: #fce7f3;
+            color: #be185d;
+            margin-left: 6px;
+        }
+        /* 決算間近・52週高値圏・信用倍率急増・大量保有報告書・静かな出来高増加は、判断に直結するバッジと違い
            あくまで参考情報のため、増えすぎてカードが見づらくならないよう折りたたみにまとめる。
            <details>/<summary>はJS不要のブラウザ標準機能で、st.markdown(unsafe_allow_html)でも
            そのまま動作する。 */
@@ -746,7 +777,8 @@ def inject_style():
             .stock-card .badge-earnings-soon,
             .stock-card .badge-high52w,
             .stock-card .badge-margin-spike,
-            .stock-card .badge-edinet {
+            .stock-card .badge-edinet,
+            .stock-card .badge-quiet-accum {
                 margin-left: 0;
                 margin-right: 6px;
             }
@@ -938,6 +970,58 @@ def detect_speculative_signal(code: str):
     reason_text = "・".join(reasons)
     level = "warning" if is_thin_baseline else "attention"
     return level, reason_text
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def detect_quiet_accumulation_signal(code: str):
+    """YouTube動画（機関投資家の執行手法解説）で紹介されていた、
+    「値段はほとんど動かないのに出来高だけ増える」パターン（機関投資家が
+    マーケットインパクトを避けながらこっそり仕込んでいる可能性がある値動き）を検知する。
+
+    「仕手株疑い」バッジ（値動きが既に大きく出ている状態を検知）とは逆に、
+    値段にまだ現れていない段階の出来高の変化を捉えるのが狙い。
+    時価総額が小さすぎる銘柄は機関投資家がそもそも入りにくいため対象外にする。
+
+    戻り値: (True, reason) または (False, None)"""
+    end = dt.date.today()
+    start = end - dt.timedelta(days=90)
+    try:
+        hist = fetch_history(code, start, end)
+    except Exception:
+        return False, None
+    if hist is None or hist.empty:
+        return False, None
+    hist = hist.sort_index().dropna(subset=["High", "Low", "Close", "Volume"])
+    total_needed = QUIET_ACCUM_LOOKBACK_DAYS + QUIET_ACCUM_BASELINE_DAYS
+    if len(hist) < total_needed:
+        return False, None
+
+    fundamentals = fetch_fundamentals(code)
+    market_cap = fundamentals.get("market_cap") if fundamentals else None
+    if market_cap is not None and market_cap < QUIET_ACCUM_MIN_MARKET_CAP:
+        return False, None
+
+    recent = hist.iloc[-QUIET_ACCUM_LOOKBACK_DAYS:]
+    prior = hist.iloc[-total_needed:-QUIET_ACCUM_LOOKBACK_DAYS]
+
+    prior_avg_vol = prior["Volume"].mean()
+    if not prior_avg_vol or prior_avg_vol <= 0:
+        return False, None
+    recent_avg_vol = recent["Volume"].mean()
+    vol_ratio = recent_avg_vol / prior_avg_vol
+
+    recent_avg_price = recent["Close"].mean()
+    if not recent_avg_price or recent_avg_price <= 0:
+        return False, None
+    price_range_pct = (recent["High"].max() - recent["Low"].min()) / recent_avg_price * 100
+
+    if vol_ratio >= QUIET_ACCUM_VOLUME_RATIO and price_range_pct <= QUIET_ACCUM_PRICE_RANGE_PCT:
+        reason = (
+            f"直近{QUIET_ACCUM_LOOKBACK_DAYS}営業日の平均出来高が、その前の{QUIET_ACCUM_BASELINE_DAYS}営業日平均の"
+            f"{vol_ratio:.1f}倍に増えている一方、値幅は{price_range_pct:.1f}%に収まっています"
+        )
+        return True, reason
+    return False, None
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1314,8 +1398,8 @@ def margin_spike_info(margin: dict):
     return None
 
 
-def build_extra_badges(earnings_soon, near_high, margin_spike, edinet_new: bool) -> str:
-    """決算間近・52週高値圏・信用倍率急増・大量保有報告書のバッジHTMLをまとめて返す。
+def build_extra_badges(earnings_soon, near_high, margin_spike, edinet_new: bool, quiet_accum=None) -> str:
+    """決算間近・52週高値圏・信用倍率急増・大量保有報告書・静かな出来高増加のバッジHTMLをまとめて返す。
     引数がNone/Falseのものはバッジを出さない。
 
     これらは「トレンド確立度」「飛びつき注意」「ルール適合」のような判断に直結するバッジとは違い、
@@ -1335,6 +1419,9 @@ def build_extra_badges(earnings_soon, near_high, margin_spike, edinet_new: bool)
         )
     if edinet_new:
         parts.append(f'<span class="badge badge-edinet" title="{GLOSSARY["大量保有報告書 新規あり"]}">🏦 大量保有 新規あり</span>')
+    if quiet_accum:
+        tooltip = f"{quiet_accum}。{GLOSSARY['静かな出来高増加']}" if isinstance(quiet_accum, str) else GLOSSARY["静かな出来高増加"]
+        parts.append(f'<span class="badge badge-quiet-accum" title="{tooltip}">🔍 静かな出来高増加</span>')
     if not parts:
         return ""
     return (
@@ -2092,6 +2179,7 @@ def render_lowprice_page(
                 if (check_extra_signals and get_edinet_api_key())
                 else []
             )
+            quiet_accum_flag, quiet_accum_reason = detect_quiet_accumulation_signal(code)
             rows_lp.append({
                 "code": code,
                 "name": name,
@@ -2114,6 +2202,7 @@ def render_lowprice_page(
                 "near_high": near_52w_high_info(high_52w, latest_p),
                 "margin_spike": margin_spike_info(margin),
                 "edinet_new": bool(edinet_events),
+                "quiet_accum": quiet_accum_reason if quiet_accum_flag else None,
             })
 
     df_lp = pd.DataFrame(rows_lp)
@@ -2192,7 +2281,8 @@ def render_lowprice_page(
             rule_badge = ""
 
         extra_badges = build_extra_badges(
-            r.get("earnings_soon"), r.get("near_high"), r.get("margin_spike"), r.get("edinet_new")
+            r.get("earnings_soon"), r.get("near_high"), r.get("margin_spike"), r.get("edinet_new"),
+            r.get("quiet_accum"),
         )
 
         render_html(
@@ -2695,6 +2785,7 @@ with st.spinner("株価データを取得中です…"):
             if (check_extra_signals and get_edinet_api_key())
             else []
         )
+        quiet_accum_flag, quiet_accum_reason = detect_quiet_accumulation_signal(code)
         rows.append(
             {
                 "code": code,
@@ -2719,6 +2810,7 @@ with st.spinner("株価データを取得中です…"):
                 "near_high": near_52w_high_info(high_52w, latest_p),
                 "margin_spike": margin_spike_info(margin),
                 "edinet_new": bool(edinet_events),
+                "quiet_accum": quiet_accum_reason if quiet_accum_flag else None,
             }
         )
 
@@ -2999,7 +3091,8 @@ with tab1:
             rule_badge = ""
 
         extra_badges = build_extra_badges(
-            r.get("earnings_soon"), r.get("near_high"), r.get("margin_spike"), r.get("edinet_new")
+            r.get("earnings_soon"), r.get("near_high"), r.get("margin_spike"), r.get("edinet_new"),
+            r.get("quiet_accum"),
         )
 
         render_html(
@@ -3255,6 +3348,11 @@ with tab2:
             value=True,
             help=glossary_help("移動平均線", "出来高", "RSI"),
         )
+        show_vwma = st.checkbox(
+            f"VWMA（{VWMA_WINDOW_DAYS}日出来高加重移動平均線）を表示する",
+            value=False,
+            help=glossary_help("VWMA（出来高加重移動平均線）"),
+        )
         chart_start = today - dt.timedelta(days=chart_days)
 
         # 移動平均線(最大75日)が表示期間の最初から途切れないよう、表示開始日より前のぶんも多めに取得する
@@ -3265,6 +3363,10 @@ with tab2:
             hist_ext["MA5"] = hist_ext["Close"].rolling(window=5, min_periods=5).mean()
             hist_ext["MA25"] = hist_ext["Close"].rolling(window=25, min_periods=25).mean()
             hist_ext["MA75"] = hist_ext["Close"].rolling(window=75, min_periods=75).mean()
+            # VWMA（出来高加重移動平均線）: 単純平均のMAと違い、出来高が多かった日の価格ほど強く反映される
+            vwma_num = (hist_ext["Close"] * hist_ext["Volume"]).rolling(window=VWMA_WINDOW_DAYS, min_periods=VWMA_WINDOW_DAYS).sum()
+            vwma_den = hist_ext["Volume"].rolling(window=VWMA_WINDOW_DAYS, min_periods=VWMA_WINDOW_DAYS).sum()
+            hist_ext["VWMA"] = vwma_num / vwma_den.replace(0, pd.NA)
             hist_ext["RSI14"] = compute_rsi(hist_ext["Close"], period=14)
             hist = hist_ext[(hist_ext.index.date >= chart_start) & (hist_ext.index.date <= today)]
             if hist.empty:
@@ -3314,6 +3416,17 @@ with tab2:
                 row=1,
                 col=1,
             )
+
+            if show_vwma:
+                fig.add_trace(
+                    go.Scatter(
+                        x=hist.index, y=hist["VWMA"], mode="lines",
+                        name=f"VWMA({VWMA_WINDOW_DAYS}日)",
+                        line=dict(color="#0891b2", width=1.4, dash="dot"),
+                        hovertemplate="%{x|%Y-%m-%d}<br>VWMA: %{y:.1f}円<extra></extra>",
+                    ),
+                    row=1, col=1,
+                )
 
             if show_technical:
                 fig.add_trace(
