@@ -1,0 +1,12 @@
+# APIキーなどの秘密情報（誤ってコミットしないように除外）
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+
+# アプリ実行時に生成される個人データ（サーバー上に保存される想定のためGit管理対象外）
+groups.json
+portfolio.json
+trades.json
+entry_rule.json

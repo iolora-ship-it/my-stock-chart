@@ -66,6 +66,11 @@ SPEC_WEEK_PCT_THRESHOLD = 30.0  # 直近5営業日の値動きが何%以上で�
 # 「トレンド確立度」判定基準（MA5/MA25/MA75のパーフェクトオーダー＋25日線からの乖離率）
 TREND_EXTENDED_DEV_THRESHOLD = 15.0  # 25日線からの乖離率がこれ以上だと「伸びすぎ」の注記を出す
 
+# 大量保有報告書（EDINET）関連の設定
+EDINET_LARGE_HOLDING_LOOKBACK_DAYS = 60  # 遡って確認する日数（営業日ベースではなく暦日）
+EDINET_DOC_TYPE_LARGE_HOLDING = "350"    # 大量保有報告書・変更報告書（同じコードで両方返ってくる）
+EDINET_DOC_TYPE_LARGE_HOLDING_CORRECTION = "360"  # 訂正大量保有報告書
+
 # 「初動の信頼度（だまし判定）」の基準
 ENTRY_VOLUME_RATIO_THRESHOLD = 1.2   # 出来高が直近5日平均の何倍以上あれば「出来高を伴う」とみなすか
 ENTRY_CLOSE_POS_THRESHOLD = 0.6      # 終値がその日の値幅の上位何割以内にあれば「強い引け」とみなすか（0〜1）
@@ -131,6 +136,19 @@ GLOSSARY = {
         "直近で値上がりしているものの、移動平均線によるトレンド確立や、出来高を伴う初動の裏付けが"
         "まだ弱い銘柄に表示される注意喚起です。値動きの勢いだけを見て高値で買ってしまう"
         "（いわゆる「飛びつき買い・高値づかみ」）を避けるための目安であり、絶対に買ってはいけないという意味ではありません。"
+    ),
+    "大量保有報告書": (
+        "ある株主が発行済株式の5%を超えて保有した場合に、金融庁のEDINET（電子開示システム）へ提出が義務付けられる書類です。"
+        "米国の13F・13D報告書の日本版にあたり、保有割合が5%を超えてから原則5営業日以内という比較的速いタイミングで開示されます。"
+        "新規に5%を超えた場合の「大量保有報告書」だけでなく、保有割合が1%以上増減した場合の「変更報告書」も同じ枠組みで開示されます。"
+        "大株主が増えている（新規保有・買い増し）銘柄は、機関投資家などから注目されている可能性がある一方、"
+        "あくまで提出義務が生じたタイミングの情報であり、その後すぐに売却されている可能性もある点にご注意ください。"
+    ),
+    "利益確定ルール": (
+        "あらかじめ「+◯%になったら利益確定する」という基準を自分で決めておく考え方です。"
+        "大株主の「売り」に関する情報（変更報告書・大量保有の解消など）は「買い」の新規報告よりもさらに気づきにくいため、"
+        "他者の売りサインを待つよりも、自分で決めた基準で機械的に利益確定する方が有効な場合があります。"
+        "サイドバーの「🎯 エントリールール設定」で設定すると、売買記録タブでルール通りに利確できているかを振り返れます。"
     ),
 }
 
@@ -1049,6 +1067,116 @@ def fetch_margin_balance(code: str):
     }
 
 
+# ---------------------------------------------------------------------------
+# 大量保有報告書ウォッチ（EDINET APIから、5%以上保有の新規・変更報告を確認する）
+#   ※YouTube動画で紹介されていた「米国の13Fファイリングで機関投資家の動向を追う」手法の日本版。
+#     13Fは米国株専用の制度のため、日本株では同じ役割を果たす大量保有報告書（13D相当）で代用している。
+# ---------------------------------------------------------------------------
+def get_edinet_api_key() -> str:
+    """EDINET APIキーを取得する。st.secretsに未設定でもエラーにならないようにガードする。
+    Streamlit Community Cloudでは「Secrets」に、ローカルでは.streamlit/secrets.tomlに
+    EDINET_API_KEY = "取得したキー" の形式で設定する。"""
+    try:
+        key = st.secrets.get("EDINET_API_KEY", "")
+    except Exception:
+        key = ""
+    return (key or os.environ.get("EDINET_API_KEY", "")).strip()
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_edinet_day_documents(date_str: str, api_key: str):
+    """指定日(YYYY-MM-DD)にEDINETへ提出された書類のうち、大量保有報告書関連
+    （docTypeCode 350=大量保有報告書/変更報告書、360=訂正）だけを抽出して返す。
+    銘柄によらず「その日に出た書類」を1回取得するだけなので、複数銘柄で使い回せるようキャッシュする。"""
+    if not api_key:
+        return []
+    try:
+        url = "https://api.edinet-fsa.go.jp/api/v2/documents.json"
+        params = {"date": date_str, "type": 2, "Subscription-Key": api_key}
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        return []
+
+    out = []
+    for r in data.get("results") or []:
+        doc_type = r.get("docTypeCode")
+        if doc_type not in (EDINET_DOC_TYPE_LARGE_HOLDING, EDINET_DOC_TYPE_LARGE_HOLDING_CORRECTION):
+            continue
+        sec_code = (r.get("secCode") or "").strip()
+        if not sec_code:
+            continue
+        out.append(
+            {
+                "secCode": sec_code,
+                "filerName": r.get("filerName", ""),
+                "docDescription": r.get("docDescription", "") or "",
+                "docTypeCode": doc_type,
+                "submitDateTime": r.get("submitDateTime", "") or "",
+            }
+        )
+    return out
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_large_shareholding_events(code: str, lookback_days: int = EDINET_LARGE_HOLDING_LOOKBACK_DAYS):
+    """直近lookback_days日間の大量保有報告書・変更報告書のうち、指定銘柄(code)に該当するものを
+    新しい順に返す。証券コードはEDINET側では5桁（4桁+末尾0）で管理されているため、
+    4桁コードには末尾に0を付けて突き合わせる。
+    戻り値: list of dict {date(YYYY-MM-DD), filerName, is_new, is_correction, docDescription}"""
+    api_key = get_edinet_api_key()
+    if not api_key:
+        return []
+    target_sec = f"{code}0" if len(code) == 4 else code
+
+    events = []
+    today_d = dt.date.today()
+    for i in range(lookback_days):
+        d = today_d - dt.timedelta(days=i)
+        if d.weekday() >= 5:  # 土日はEDINETへの提出がないためスキップ（API呼び出し回数の削減）
+            continue
+        docs = fetch_edinet_day_documents(d.isoformat(), api_key)
+        for doc in docs:
+            if doc["secCode"] != target_sec:
+                continue
+            desc = doc["docDescription"]
+            is_correction = doc["docTypeCode"] == EDINET_DOC_TYPE_LARGE_HOLDING_CORRECTION
+            is_new = (not is_correction) and ("変更報告書" not in desc)
+            events.append(
+                {
+                    "date": (doc["submitDateTime"][:10] or d.isoformat()),
+                    "filerName": doc["filerName"],
+                    "is_new": is_new,
+                    "is_correction": is_correction,
+                    "docDescription": desc,
+                }
+            )
+    events.sort(key=lambda e: e["date"], reverse=True)
+    return events
+
+
+def compute_price_deviation_since(code: str, base_date_str: str):
+    """指定日（大量保有報告書の提出日など）時点の終値と、直近の終値との乖離率(%)を計算する。
+    提出日が休場日の場合は、その日以前で最も近い営業日の終値を基準にする。"""
+    try:
+        base_date = dt.date.fromisoformat(base_date_str)
+    except Exception:
+        return None
+    hist = fetch_history(code, base_date - dt.timedelta(days=10), dt.date.today())
+    if hist.empty:
+        return None
+    hist = hist.sort_index()
+    past = hist[hist.index.date <= base_date]
+    if past.empty:
+        return None
+    base_close = float(past["Close"].iloc[-1])
+    latest_close = float(hist["Close"].iloc[-1])
+    if base_close <= 0:
+        return None
+    return (latest_close - base_close) / base_close * 100
+
+
 def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     """簡易RSI（相対力指数）を計算する。0〜100で、70以上=買われすぎ、30以下=売られすぎの目安。"""
     delta = close.diff()
@@ -1351,8 +1479,9 @@ def save_portfolio(holdings: list):
 def load_entry_rule() -> dict:
     """自分で設定した「買ってよい条件」を読み込む。
     require_trend: トレンド確立度が「確立」であることを必須にするか
-    require_entry: 初動の信頼度が✅であることを必須にするか"""
-    default = {"require_trend": False, "require_entry": False}
+    require_entry: 初動の信頼度が✅であることを必須にするか
+    take_profit_pct: 利益確定の目標ライン(%)。Noneなら未設定"""
+    default = {"require_trend": False, "require_entry": False, "take_profit_pct": None}
     if os.path.exists(RULE_FILE):
         try:
             with open(RULE_FILE, "r", encoding="utf-8") as f:
@@ -2200,7 +2329,29 @@ with st.sidebar.expander("🎯 エントリールール設定"):
         help=glossary_help("初動の信頼度"),
         key="rule_require_entry",
     )
-    new_rule = {"require_trend": rule_require_trend, "require_entry": rule_require_entry}
+    st.markdown("---")
+    rule_tp_enabled = st.checkbox(
+        "利益確定の目標ラインを決めておく",
+        value=entry_rule.get("take_profit_pct") is not None,
+        help=glossary_help("利益確定ルール"),
+        key="rule_tp_enabled",
+    )
+    rule_take_profit_pct = None
+    if rule_tp_enabled:
+        rule_take_profit_pct = st.number_input(
+            "利益確定の目標ライン（%）",
+            min_value=1.0,
+            max_value=200.0,
+            value=float(entry_rule.get("take_profit_pct") or 20.0),
+            step=1.0,
+            key="rule_tp_pct",
+            help="設定すると、売買記録タブでこの目標ラインに到達できた決済とできなかった決済を比較表示します。",
+        )
+    new_rule = {
+        "require_trend": rule_require_trend,
+        "require_entry": rule_require_entry,
+        "take_profit_pct": rule_take_profit_pct,
+    }
     if new_rule != entry_rule:
         save_entry_rule(new_rule)
         entry_rule = new_rule
@@ -2813,6 +2964,58 @@ with tab2:
             else:
                 st.metric("信用買い残", "―", help=glossary_help("信用倍率") + "\n\nこの銘柄はデータを取得できませんでした。")
 
+        edinet_key = get_edinet_api_key()
+        st.markdown("**🏦 大量保有報告書（5%超保有の新規・変更報告）**")
+        if not edinet_key:
+            with st.expander("この機能を使うには設定が必要です"):
+                st.caption(
+                    "EDINET（金融庁の開示システム）のAPIキーを設定すると、この銘柄について5%を超えて保有する"
+                    "大株主の新規報告・変更報告を確認できるようになります。"
+                    "EDINET APIのウェブサイトで無料登録するとAPIキーを取得できます。"
+                    "取得したキーは、ローカルなら`.streamlit/secrets.toml`に、"
+                    "Streamlit Community Cloudならアプリ管理画面の「Secrets」に、"
+                    "`EDINET_API_KEY = \"取得したキー\"` の形式で保存してください。"
+                    + "\n\n" + GLOSSARY["大量保有報告書"]
+                )
+        else:
+            edinet_state_key = f"edinet_events_{focus_code}"
+            if st.button(
+                f"直近{EDINET_LARGE_HOLDING_LOOKBACK_DAYS}日分をEDINETで確認する",
+                key=f"edinet_check_btn_{focus_code}",
+                help="ボタンを押すとEDINETに問い合わせます。初回は日数分の通信が必要なため、数十秒かかる場合があります。",
+            ):
+                with st.spinner("EDINETを確認中…（初回は時間がかかる場合があります）"):
+                    st.session_state[edinet_state_key] = get_large_shareholding_events(focus_code)
+
+            events_focus = st.session_state.get(edinet_state_key)
+            if events_focus is None:
+                st.caption("ボタンを押すと確認します（自動では取得しません）。")
+            elif not events_focus:
+                st.caption(f"直近{EDINET_LARGE_HOLDING_LOOKBACK_DAYS}日間の大量保有報告書は見つかりませんでした。")
+            else:
+                latest_ev = events_focus[0]
+                if latest_ev["is_new"]:
+                    badge_label = "🆕 新規に5%超保有"
+                elif latest_ev["is_correction"]:
+                    badge_label = "✏️ 訂正報告"
+                else:
+                    badge_label = "📈 保有比率の変更報告"
+                dev_pct = compute_price_deviation_since(focus_code, latest_ev["date"])
+                dev_txt = f"　／　提出日の終値比 {dev_pct:+.1f}%" if dev_pct is not None else ""
+                st.info(
+                    f"{badge_label}: {latest_ev['date']}提出（提出者: {latest_ev['filerName']}）{dev_txt}",
+                    icon="🏦",
+                )
+                st.caption(
+                    "※ 提出日の終値と比べてマイナス（安い）ほど、大株主になった時点よりも安く買えている可能性があります。"
+                    "ただしあくまで提出義務が生じたタイミングの情報で、その後の売買までは分かりません。"
+                )
+                with st.expander(f"直近{len(events_focus)}件の提出履歴"):
+                    hist_ev_df = pd.DataFrame(events_focus)[["date", "filerName", "docDescription"]].rename(
+                        columns={"date": "提出日", "filerName": "提出者", "docDescription": "書類概要"}
+                    )
+                    st.dataframe(hist_ev_df, use_container_width=True, hide_index=True)
+
         chart_days = st.select_slider(
             "表示期間",
             options=[10, 30, 60, 90, 180, 365, 730],
@@ -3370,6 +3573,33 @@ with tab6:
                     "「トレンド確立度」「初動の信頼度」を必須条件にしてから買うようにすると、"
                     "記録がどう変わるか試してみる価値があります。"
                 )
+
+            tp_target = entry_rule.get("take_profit_pct")
+            pct_trades = [t for t in closed_trades if t["pl_pct"] is not None]
+            if tp_target and pct_trades:
+                hit_trades = [t for t in pct_trades if t["pl_pct"] >= tp_target]
+                miss_trades = [t for t in pct_trades if t["pl_pct"] < tp_target]
+                st.markdown(f"#### 🎯 利益確定ルール（+{tp_target:.0f}%）との比較")
+                st.caption(glossary_help("利益確定ルール"))
+                tpc1, tpc2 = st.columns(2)
+                with tpc1:
+                    st.metric(
+                        f"目標ライン(+{tp_target:.0f}%)に到達できた決済",
+                        f"{len(hit_trades)}回 / {len(pct_trades)}回",
+                    )
+                    if hit_trades:
+                        avg_hit_pl = sum(t["pl"] for t in hit_trades) / len(hit_trades)
+                        st.caption(f"平均損益 {avg_hit_pl:+,.0f}円/回")
+                with tpc2:
+                    st.metric("目標ラインに届かなかった決済", f"{len(miss_trades)}回 / {len(pct_trades)}回")
+                    if miss_trades:
+                        avg_miss_pl = sum(t["pl"] for t in miss_trades) / len(miss_trades)
+                        st.caption(f"平均損益 {avg_miss_pl:+,.0f}円/回")
+                if miss_trades:
+                    st.caption(
+                        f"💡 {len(miss_trades)}回は目標ラインの+{tp_target:.0f}%に届く前に決済しています。"
+                        "利確が早すぎる・遅すぎる傾向がないか、個別の記録（買った理由・心理状態）と合わせて振り返ってみてください。"
+                    )
 
             rushed_trades = [t for t in closed_trades if t.get("mood") == "😰 焦っていた"]
             other_trades = [t for t in closed_trades if t.get("mood") != "😰 焦っていた"]
