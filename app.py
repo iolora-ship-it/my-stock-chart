@@ -44,6 +44,18 @@ import yfinance as yf
 
 st.set_page_config(page_title="My Stock Chart", layout="wide", page_icon="📈")
 
+# 「🔥 セクターの勢い」「🌟 プラス材料の多いセクター」の「見る」ボタンから、そのセクターに
+# 絞り込んでジャンプする処理。サイドバーのウィジェット（view_mode_radio等）は既に一度
+# 描画された後だと、そのkeyのsession_stateを直接書き換えられない（StreamlitAPIException）ため、
+# ボタン押下時は一旦「_pending_sector_jump」に行き先だけを覚えてrerunし、
+# 次のスクリプト実行の一番最初（ウィジェットがまだ何も描画されていないタイミング）で
+# ここから実際のウィジェットのkeyに反映する。
+if "_pending_sector_jump" in st.session_state:
+    _pending_sector = st.session_state.pop("_pending_sector_jump")
+    st.session_state["view_mode_radio"] = "セクターから選ぶ"
+    st.session_state["sector_group_select"] = "すべて"
+    st.session_state["sector_select_すべて"] = _pending_sector
+
 STOCKS_CSV = "stocks.csv"
 LOWPRICE_CSV = "lowprice_stocks.csv"
 GROUPS_FILE = "groups.json"
@@ -219,6 +231,33 @@ def render_html(html: str):
     各行の前後の空白を取り除いてから渡すことで、常にHTMLとして解釈させる。"""
     lines = [line.strip() for line in html.strip().splitlines()]
     st.markdown("\n".join(lines), unsafe_allow_html=True)
+
+
+def jump_to_sector(sector_name: str):
+    """「セクターの勢い」「プラス材料の多いセクター」の一覧から、そのセクターに絞り込んだ表示へ
+    ジャンプする。この時点ではサイドバーのウィジェットが既に描画済みのため、対応するウィジェットの
+    keyを直接書き換えることはできない（StreamlitAPIException）。そのため行き先だけを
+    「_pending_sector_jump」に覚えてrerunし、実際のsession_state反映はスクリプトの一番最初
+    （ウィジェットがまだ描画されていないタイミング）で行う。"""
+    st.session_state["_pending_sector_jump"] = sector_name
+    st.rerun()
+
+
+def render_sector_jump_row(sector: str, card_html: str, key_prefix: str):
+    """セクター名・カードのHTML・ボタンキーの接頭辞を受け取り、右端の「見る」ボタンを押すと
+    そのセクターに絞り込んでジャンプできる行を描画する
+    （🔥セクターの勢い・🌟プラス材料の多いセクターの両方から使う共通部品）。"""
+    row_col, btn_col = st.columns([5, 1])
+    with row_col:
+        render_html(card_html)
+    with btn_col:
+        if st.button(
+            "見る",
+            key=f"{key_prefix}_{sector}",
+            help=f"「{sector}」に絞り込んで表示します",
+            use_container_width=True,
+        ):
+            jump_to_sector(sector)
 
 PERIOD_PRESETS = {
     "1日": 1,
@@ -2624,14 +2663,18 @@ if st.session_state["pinned_codes"]:
 
 st.sidebar.markdown("---")
 
-view_mode = st.sidebar.radio("銘柄の選び方", ["セクターから選ぶ", "⭐ グループから選ぶ"])
+view_mode = st.sidebar.radio(
+    "銘柄の選び方", ["セクターから選ぶ", "⭐ グループから選ぶ"], key="view_mode_radio"
+)
 
 groups = load_groups()
 
 if view_mode == "セクターから選ぶ":
     all_sectors_in_master = master["sector"].unique().tolist()
     group_names = ["すべて"] + list(SECTOR_GROUPS.keys())
-    selected_group = st.sidebar.selectbox("業種グループ（絞り込み）", group_names)
+    selected_group = st.sidebar.selectbox(
+        "業種グループ（絞り込み）", group_names, key="sector_group_select"
+    )
 
     if selected_group == "すべて":
         sectors = ["すべて"] + sorted(all_sectors_in_master)
@@ -2894,12 +2937,12 @@ else:
     with col_g:
         st.markdown("**📈 勢いのあるセクター（上昇幅が大きい）**")
         for _, r in gainers.iterrows():
-            render_html(_sector_row_html(r))
+            render_sector_jump_row(r["sector"], _sector_row_html(r), "jump_gainer")
     with col_l:
         st.markdown("**📉 勢いのないセクター（下落幅が大きい）**")
         for _, r in losers.iterrows():
-            render_html(_sector_row_html(r))
-    st.caption("👈 気になるセクターがあれば、左のサイドバーの「業種グループ」→「セクター」で絞り込んで見てみましょう。")
+            render_sector_jump_row(r["sector"], _sector_row_html(r), "jump_loser")
+    st.caption("👈 セクター名の横の「見る」を押すと、そのセクターに絞り込んで表示します（左サイドバーからも「業種グループ」→「セクター」で絞り込めます）。")
 
 st.markdown("")
 
@@ -2941,9 +2984,10 @@ else:
             """
 
         for _, r in top_plus.iterrows():
-            render_html(_plus_row_html(r))
+            render_sector_jump_row(r["sector"], _plus_row_html(r), "jump_plus")
     st.caption(
-        "👈 デフォルトで表示される銘柄も、このランキングでプラス材料の多いセクターから優先的に選ばれます"
+        "👈 セクター名の横の「見る」を押すと、そのセクターに絞り込んで表示します。"
+        "デフォルトで表示される銘柄も、このランキングでプラス材料の多いセクターから優先的に選ばれます"
         "（反映は次回のページ操作時からになります）。特定のセクター・銘柄を推奨するものではなく、"
         "あくまでアプリが機械的に検知した目安です。"
     )
