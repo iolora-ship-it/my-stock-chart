@@ -58,6 +58,12 @@ CHASING_PCT_THRESHOLD = 8.0  # 選択期間のトータル騰落率がこれ以�
 # （出来高が極端に少ない銘柄は、株価データが実勢を反映していない・更新が古いことがあるため）
 LIQUIDITY_THIN_THRESHOLD = 30_000_000  # 3,000万円/日
 
+# 追加バッジ（決算間近・52週高値圏・信用倍率急増・大量保有報告書）のしきい値
+EARNINGS_SOON_DAYS = 14  # 次の決算発表予定日がこの日数以内なら「決算間近」バッジを表示
+NEAR_52W_HIGH_PCT = 5.0  # 52週高値からこの%以内（更新も含む）なら「高値圏」バッジを表示
+MARGIN_SPIKE_PCT = 15.0  # 信用買い残が前週比でこの%以上増えていたら「急増」バッジを表示
+EDINET_BADGE_LOOKBACK_DAYS = 14  # 一覧バッジ用のEDINETチェック期間（個別チャートページの60日より短くして負荷を抑える）
+
 # 「値動き急変（仕手株リスク）」バッジの判定基準
 SPEC_VOLUME_SPIKE_RATIO = 3.0   # 直近の出来高が、それ以前の平均出来高の何倍以上で急増とみなすか
 SPEC_DAY_PCT_THRESHOLD = 15.0   # 直近1営業日の値動きが何%以上で急変とみなすか
@@ -149,6 +155,26 @@ GLOSSARY = {
         "大株主の「売り」に関する情報（変更報告書・大量保有の解消など）は「買い」の新規報告よりもさらに気づきにくいため、"
         "他者の売りサインを待つよりも、自分で決めた基準で機械的に利益確定する方が有効な場合があります。"
         "サイドバーの「🎯 エントリールール設定」で設定すると、売買記録タブでルール通りに利確できているかを振り返れます。"
+    ),
+    "決算間近": (
+        f"次の決算発表予定日が{EARNINGS_SOON_DAYS}日以内に迫っていることを示すバッジです。"
+        "決算発表の前後は好材料・悪材料どちらの反応でも株価が大きく動きやすいため、"
+        "発表日をまたいでポジションを持つ場合は特にご注意ください。"
+    ),
+    "52週高値圏": (
+        f"現在値が過去52週間（約1年間）の最高値から{NEAR_52W_HIGH_PCT:.0f}%以内、"
+        "またはその高値を更新している状態を示すバッジです。"
+        "新高値を更新する銘柄は上値の抵抗（売り圧力）が少なく勢いが続きやすいとされる一方、"
+        "すでに大きく買われた後でもあるため、高値づかみのリスクにも注意してください。"
+    ),
+    "信用倍率急増": (
+        f"信用買い残（信用取引での買い建て株数）が前週比で{MARGIN_SPIKE_PCT:.0f}%以上増えている状態を示すバッジです。"
+        "信用買い残は将来いずれ反対売買（返済売り）される「将来の売り圧力」の目安になるため、"
+        "急増している銘柄は株価が伸び悩んだ際に投げ売りが出やすく、上値を抑える要因になり得ます。"
+    ),
+    "大量保有報告書 新規あり": (
+        f"直近{EDINET_BADGE_LOOKBACK_DAYS}日以内に、5%を超えて保有する大株主の新規報告・変更報告が"
+        "EDINETに提出されていることを示すバッジです。詳細は個別チャートページの「🏦 大量保有報告書」で確認できます。"
     ),
 }
 
@@ -523,6 +549,26 @@ def inject_style():
             color: #6b7280;
             margin-left: 6px;
         }
+        .stock-card .badge-earnings-soon {
+            background: #ffe9d6;
+            color: #b5560a;
+            margin-left: 6px;
+        }
+        .stock-card .badge-high52w {
+            background: #e6f7f5;
+            color: #0f7a6c;
+            margin-left: 6px;
+        }
+        .stock-card .badge-margin-spike {
+            background: #f3e8ff;
+            color: #7c3aed;
+            margin-left: 6px;
+        }
+        .stock-card .badge-edinet {
+            background: #eef0ff;
+            color: #3730a3;
+            margin-left: 6px;
+        }
         .stock-card .fundamentals-row {
             margin-top: 10px;
             padding-top: 10px;
@@ -660,7 +706,11 @@ def inject_style():
             .stock-card .badge-entry-bad,
             .stock-card .badge-chasing,
             .stock-card .badge-rule-ok,
-            .stock-card .badge-rule-fail {
+            .stock-card .badge-rule-fail,
+            .stock-card .badge-earnings-soon,
+            .stock-card .badge-high52w,
+            .stock-card .badge-margin-spike,
+            .stock-card .badge-edinet {
                 margin-left: 0;
                 margin-right: 6px;
             }
@@ -1175,6 +1225,65 @@ def compute_price_deviation_since(code: str, base_date_str: str):
     if base_close <= 0:
         return None
     return (latest_close - base_close) / base_close * 100
+
+
+# ---------------------------------------------------------------------------
+# 一覧カード用の追加バッジ判定（決算間近・52週高値圏・信用倍率急増・大量保有報告書）
+# ---------------------------------------------------------------------------
+def earnings_soon_info(earnings_dates: list, today: dt.date):
+    """次の決算発表予定日がEARNINGS_SOON_DAYS日以内に迫っている場合に (発表予定日, 残り日数) を返す。
+    予定がない、または先すぎる場合はNone。"""
+    if not earnings_dates:
+        return None
+    future = [d for d in earnings_dates if d >= today]
+    if not future:
+        return None
+    next_date = future[0]
+    days_left = (next_date - today).days
+    if days_left <= EARNINGS_SOON_DAYS:
+        return next_date, days_left
+    return None
+
+
+def near_52w_high_info(high_52w, latest_price):
+    """現在値が52週高値からNEAR_52W_HIGH_PCT%以内（更新している場合を含む）にある場合に
+    高値からの乖離率(%)を返す。プラス=高値まであと◯%、マイナス（またはゼロ）=高値を更新中。"""
+    if high_52w is None or latest_price is None or high_52w <= 0:
+        return None
+    diff_pct = (high_52w - latest_price) / high_52w * 100
+    if diff_pct <= NEAR_52W_HIGH_PCT:
+        return diff_pct
+    return None
+
+
+def margin_spike_info(margin: dict):
+    """信用買い残が前週比でMARGIN_SPIKE_PCT%以上増えている場合に増加率(%)を返す。それ以外はNone。"""
+    if not margin:
+        return None
+    pct = margin.get("buy_change_pct")
+    if pct is not None and pct >= MARGIN_SPIKE_PCT:
+        return pct
+    return None
+
+
+def build_extra_badges(earnings_soon, near_high, margin_spike, edinet_new: bool) -> str:
+    """決算間近・52週高値圏・信用倍率急増・大量保有報告書のバッジHTMLをまとめて返す。
+    引数がNone/Falseのものはバッジを出さない。"""
+    parts = []
+    if earnings_soon:
+        next_date, days_left = earnings_soon
+        tooltip = f"{next_date}発表予定（あと{days_left}日）。{GLOSSARY['決算間近']}"
+        parts.append(f'<span class="badge badge-earnings-soon" title="{tooltip}">📅 決算間近（あと{days_left}日）</span>')
+    if near_high is not None:
+        label = "新高値更新" if near_high <= 0 else f"高値まで{near_high:.1f}%"
+        parts.append(f'<span class="badge badge-high52w" title="{GLOSSARY["52週高値圏"]}">🏔 {label}</span>')
+    if margin_spike is not None:
+        parts.append(
+            f'<span class="badge badge-margin-spike" title="{GLOSSARY["信用倍率急増"]}">💰 信用買い残急増（+{margin_spike:.0f}%）</span>'
+        )
+    if edinet_new:
+        parts.append(f'<span class="badge badge-edinet" title="{GLOSSARY["大量保有報告書 新規あり"]}">🏦 大量保有 新規あり</span>')
+    return "".join(parts)
 
 
 def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
@@ -1853,7 +1962,13 @@ def _render_lowprice_detail(code: str, name: str, r: dict, period_choice: str, t
     st.caption("※ 上記はトレンド確立度・初動の信頼度・仕手株判定などの指標を機械的に文章化した自動要約です。生成AIによる分析ではなく、投資判断の根拠として断定的に用いないでください。")
 
 
-def render_lowprice_page(period_choice: str, start_date: dt.date, end_date: dt.date, simple_badges: bool = True):
+def render_lowprice_page(
+    period_choice: str,
+    start_date: dt.date,
+    end_date: dt.date,
+    simple_badges: bool = True,
+    check_extra_signals: bool = False,
+):
     """低位株・無名株分析ページ本体。メインダッシュボードとは別の候補リスト（lowprice_stocks.csv）を対象に、
     株価上限などで絞り込んだうえで、メインダッシュボードと同じ指標・カードUIで一覧表示する。"""
     st.markdown(
@@ -1912,6 +2027,14 @@ def render_lowprice_page(period_choice: str, start_date: dt.date, end_date: dt.d
             spec_level, spec_reason = detect_speculative_signal(code)
             trend_status = compute_trend_status(code)
             entry_quality = compute_entry_quality(code)
+            earnings_dates = fetch_earnings_dates(code)
+            high_52w, _low_52w = fetch_52w_range(code)
+            margin = fetch_margin_balance(code) if check_extra_signals else None
+            edinet_events = (
+                get_large_shareholding_events(code, EDINET_BADGE_LOOKBACK_DAYS)
+                if (check_extra_signals and get_edinet_api_key())
+                else []
+            )
             rows_lp.append({
                 "code": code,
                 "name": name,
@@ -1930,6 +2053,10 @@ def render_lowprice_page(period_choice: str, start_date: dt.date, end_date: dt.d
                 "spec_reason": spec_reason,
                 "trend_status": trend_status,
                 "entry_quality": entry_quality,
+                "earnings_soon": earnings_soon_info(earnings_dates, today_local),
+                "near_high": near_52w_high_info(high_52w, latest_p),
+                "margin_spike": margin_spike_info(margin),
+                "edinet_new": bool(edinet_events),
             })
 
     df_lp = pd.DataFrame(rows_lp)
@@ -2007,6 +2134,10 @@ def render_lowprice_page(period_choice: str, start_date: dt.date, end_date: dt.d
         else:
             rule_badge = ""
 
+        extra_badges = build_extra_badges(
+            r.get("earnings_soon"), r.get("near_high"), r.get("margin_spike"), r.get("edinet_new")
+        )
+
         render_html(
             f"""
             <div class="stock-card">
@@ -2026,6 +2157,7 @@ def render_lowprice_page(period_choice: str, start_date: dt.date, end_date: dt.d
                         {entry_badge}
                         {chasing_badge}
                         {rule_badge}
+                        {extra_badges}
                     </div>
                 </div>
                 <div class="fundamentals-row">
@@ -2282,6 +2414,17 @@ with st.sidebar.expander("🧹 カードの表示設定"):
         key="simple_badges",
         help="薄商い・初動の信頼度バッジを非表示にして、カードをすっきり表示します。詳細は各カードの「詳しく見る」から確認できます。",
     )
+    st.markdown("---")
+    check_extra_signals = st.checkbox(
+        "🏦 信用倍率急増・大量保有報告書もチェックする",
+        value=False,
+        key="check_extra_signals",
+        help=(
+            "オンにすると、各銘柄の信用残（かぶたんのデータ）とEDINETの大量保有報告書（要APIキー設定）も"
+            "あわせて確認し、「💰 信用買い残急増」「🏦 大量保有 新規あり」バッジを表示します。"
+            "銘柄数が多いページ（低位株・無名株分析など）では、その分表示に時間がかかります。"
+        ),
+    )
 
 with st.sidebar.expander("⭐ グループを管理"):
     new_group_name = st.text_input("新しいグループ名", key="new_group_name")
@@ -2373,7 +2516,7 @@ with st.sidebar.expander("🎯 エントリールール設定"):
     st.caption("⚠️ この設定はアプリのサーバーに保存されます。判定はあくまで機械的な目安であり、必ず守るべきルールを提案するものではありません。")
 
 if page_mode == "🔍 低位株・無名株分析":
-    render_lowprice_page(period_choice, start_date, end_date, simple_badges)
+    render_lowprice_page(period_choice, start_date, end_date, simple_badges, check_extra_signals)
     st.stop()
 
 if page_mode == "🎯 ルール適合銘柄一覧":
@@ -2488,6 +2631,13 @@ with st.spinner("株価データを取得中です…"):
         spec_level, spec_reason = detect_speculative_signal(code)
         trend_status = compute_trend_status(code)
         entry_quality = compute_entry_quality(code)
+        high_52w, _low_52w = fetch_52w_range(code)
+        margin = fetch_margin_balance(code) if check_extra_signals else None
+        edinet_events = (
+            get_large_shareholding_events(code, EDINET_BADGE_LOOKBACK_DAYS)
+            if (check_extra_signals and get_edinet_api_key())
+            else []
+        )
         rows.append(
             {
                 "code": code,
@@ -2508,6 +2658,10 @@ with st.spinner("株価データを取得中です…"):
                 "spec_reason": spec_reason,
                 "trend_status": trend_status,
                 "entry_quality": entry_quality,
+                "earnings_soon": earnings_soon_info(earnings_dates, today),
+                "near_high": near_52w_high_info(high_52w, latest_p),
+                "margin_spike": margin_spike_info(margin),
+                "edinet_new": bool(edinet_events),
             }
         )
 
@@ -2787,6 +2941,10 @@ with tab1:
         else:
             rule_badge = ""
 
+        extra_badges = build_extra_badges(
+            r.get("earnings_soon"), r.get("near_high"), r.get("margin_spike"), r.get("edinet_new")
+        )
+
         render_html(
             f"""
             <div class="stock-card">
@@ -2806,6 +2964,7 @@ with tab1:
                         {entry_badge}
                         {chasing_badge}
                         {rule_badge}
+                        {extra_badges}
                     </div>
                 </div>
                 <div class="fundamentals-row">
