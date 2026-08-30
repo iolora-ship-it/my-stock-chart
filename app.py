@@ -838,6 +838,29 @@ def load_master(path: str) -> pd.DataFrame:
     return df
 
 
+def pick_diversified_default_labels(df: pd.DataFrame, n: int) -> list:
+    """複数の業種にまたがる一覧から、特定の業種に偏らないようにデフォルト表示銘柄を選ぶ。
+    各業種から1銘柄ずつ（stocks.csv内の登録順）を順番に選び、n件に達するまでラウンドロビンで回す。
+    業種がひとつしかない場合は、結果的にその業種内の先頭n件と同じになる（従来の挙動と同じ）。"""
+    if df.empty or n <= 0:
+        return []
+    sector_labels = [sub["label"].tolist() for _, sub in df.groupby("sector", sort=False)]
+    picked = []
+    idx = 0
+    while len(picked) < n:
+        added_this_round = False
+        for labels in sector_labels:
+            if idx < len(labels):
+                picked.append(labels[idx])
+                added_this_round = True
+                if len(picked) >= n:
+                    break
+        if not added_this_round:
+            break
+        idx += 1
+    return picked
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_history(ticker_code: str, start: dt.date, end: dt.date, is_index: bool = False) -> pd.DataFrame:
     """コードから .T ティッカーで日足OHLCを取得（指数の場合はそのままのティッカーを使用）"""
@@ -2489,10 +2512,11 @@ if view_mode == "セクターから選ぶ":
     sector_df["label"] = sector_df["code"] + " " + sector_df["name"]
 
     default_n = min(6, len(sector_df))
+    default_labels = pick_diversified_default_labels(sector_df, default_n)
     selected_labels = st.sidebar.multiselect(
         "銘柄",
         options=sector_df["label"].tolist(),
-        default=sector_df["label"].tolist()[:default_n],
+        default=default_labels,
         key=f"stock_select_{selected_group}_{selected_sector}",
     )
     selected_codes = [lbl.split(" ")[0] for lbl in selected_labels]
