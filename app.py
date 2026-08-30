@@ -838,13 +838,21 @@ def load_master(path: str) -> pd.DataFrame:
     return df
 
 
-def pick_diversified_default_labels(df: pd.DataFrame, n: int) -> list:
+def pick_diversified_default_labels(df: pd.DataFrame, n: int, sector_order: list = None) -> list:
     """複数の業種にまたがる一覧から、特定の業種に偏らないようにデフォルト表示銘柄を選ぶ。
-    各業種から1銘柄ずつ（stocks.csv内の登録順）を順番に選び、n件に達するまでラウンドロビンで回す。
-    業種がひとつしかない場合は、結果的にその業種内の先頭n件と同じになる（従来の挙動と同じ）。"""
+    各業種から1銘柄ずつ（業種内ではstocks.csvの登録順）を順番に選び、n件に達するまでラウンドロビンで回す。
+    sector_orderを指定すると、業種を回す順番がその並びになる（例: プラス材料スコアが高いセクター順）。
+    指定がなければ、業種が最初に登場した順（stocks.csv内の登録順）で回す。
+    業種がひとつしかない場合は、sector_orderの有無にかかわらず結果はその業種内の先頭n件と同じになる。"""
     if df.empty or n <= 0:
         return []
-    sector_labels = [sub["label"].tolist() for _, sub in df.groupby("sector", sort=False)]
+    grouped = {sector: sub["label"].tolist() for sector, sub in df.groupby("sector", sort=False)}
+    if sector_order:
+        ordered_sectors = [s for s in sector_order if s in grouped]
+        ordered_sectors += [s for s in grouped if s not in ordered_sectors]
+    else:
+        ordered_sectors = list(grouped.keys())
+    sector_labels = [grouped[s] for s in ordered_sectors]
     picked = []
     idx = 0
     while len(picked) < n:
@@ -995,33 +1003,18 @@ def detect_speculative_signal(code: str):
     return level, reason_text
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def detect_quiet_accumulation_signal(code: str):
-    """YouTube動画（機関投資家の執行手法解説）で紹介されていた、
-    「値段はほとんど動かないのに出来高だけ増える」パターン（機関投資家が
-    マーケットインパクトを避けながらこっそり仕込んでいる可能性がある値動き）を検知する。
-
-    「仕手株疑い」バッジ（値動きが既に大きく出ている状態を検知）とは逆に、
-    値段にまだ現れていない段階の出来高の変化を捉えるのが狙い。
-    時価総額が小さすぎる銘柄は機関投資家がそもそも入りにくいため対象外にする。
+def _quiet_accum_pattern_from_hist(hist: pd.DataFrame):
+    """「値段はほとんど動かないのに出来高だけ増える」パターンを、取得済みのOHLCV履歴
+    （末尾が最新営業日）から判定する（時価総額によるフィルタはここでは行わない）。
+    detect_quiet_accumulation_signal本体と、複数銘柄をまとめて取得した履歴から計算する
+    compute_sector_plus_scoreの両方から使われる。
 
     戻り値: (True, reason) または (False, None)"""
-    end = dt.date.today()
-    start = end - dt.timedelta(days=90)
-    try:
-        hist = fetch_history(code, start, end)
-    except Exception:
-        return False, None
     if hist is None or hist.empty:
         return False, None
     hist = hist.sort_index().dropna(subset=["High", "Low", "Close", "Volume"])
     total_needed = QUIET_ACCUM_LOOKBACK_DAYS + QUIET_ACCUM_BASELINE_DAYS
     if len(hist) < total_needed:
-        return False, None
-
-    fundamentals = fetch_fundamentals(code)
-    market_cap = fundamentals.get("market_cap") if fundamentals else None
-    if market_cap is not None and market_cap < QUIET_ACCUM_MIN_MARKET_CAP:
         return False, None
 
     recent = hist.iloc[-QUIET_ACCUM_LOOKBACK_DAYS:]
@@ -1047,6 +1040,39 @@ def detect_quiet_accumulation_signal(code: str):
     return False, None
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def detect_quiet_accumulation_signal(code: str):
+    """YouTube動画（機関投資家の執行手法解説）で紹介されていた、
+    「値段はほとんど動かないのに出来高だけ増える」パターン（機関投資家が
+    マーケットインパクトを避けながらこっそり仕込んでいる可能性がある値動き）を検知する。
+
+    「仕手株疑い」バッジ（値動きが既に大きく出ている状態を検知）とは逆に、
+    値段にまだ現れていない段階の出来高の変化を捉えるのが狙い。
+    時価総額が小さすぎる銘柄は機関投資家がそもそも入りにくいため対象外にする。
+    実際のパターン判定は_quiet_accum_pattern_from_hist()で行う。
+
+    戻り値: (True, reason) または (False, None)"""
+    end = dt.date.today()
+    start = end - dt.timedelta(days=90)
+    try:
+        hist = fetch_history(code, start, end)
+    except Exception:
+        return False, None
+    if hist is None or hist.empty:
+        return False, None
+    hist_sorted = hist.sort_index().dropna(subset=["High", "Low", "Close", "Volume"])
+    total_needed = QUIET_ACCUM_LOOKBACK_DAYS + QUIET_ACCUM_BASELINE_DAYS
+    if len(hist_sorted) < total_needed:
+        return False, None
+
+    fundamentals = fetch_fundamentals(code)
+    market_cap = fundamentals.get("market_cap") if fundamentals else None
+    if market_cap is not None and market_cap < QUIET_ACCUM_MIN_MARKET_CAP:
+        return False, None
+
+    return _quiet_accum_pattern_from_hist(hist)
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_52w_range(code: str):
     """過去52週間（約1年）の高値・安値を取得する。取得できない場合は (None, None)。"""
@@ -1065,10 +1091,10 @@ def fetch_52w_range(code: str):
     return float(high), float(low)
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def compute_trend_status(code: str):
-    """MA5・MA25・MA75の並び順（パーフェクトオーダー）と25日線からの乖離率・25日線の傾きから、
-    上昇トレンドが「確立」しているか、まだ底値圏からの反発を試している段階（未確立）かを判定する。
+def _trend_status_from_hist(hist: pd.DataFrame):
+    """MA5・MA25・MA75の並び順（パーフェクトオーダー）と25日線からの乖離率・25日線の傾きを、
+    取得済みのOHLCV履歴（末尾が最新営業日）から計算する。compute_trend_status本体と、
+    複数銘柄をまとめて取得した履歴から計算するcompute_sector_plus_scoreの両方から使われる。
 
     戻り値: dict または None（データ不足で判定できない場合）
       structure: "perfect_order"（短期>中期>長期＝上昇トレンド確立） / "below"（それ以外＝未確立）
@@ -1076,12 +1102,6 @@ def compute_trend_status(code: str):
       ma25_slope10: 直近10営業日での25日線自体の変化率(%)（プラス＝25日線自体が上向き）
       extended: 乖離率が伸びすぎ水準（TREND_EXTENDED_DEV_THRESHOLD）を超えているか
     """
-    end = dt.date.today()
-    start = end - dt.timedelta(days=200)
-    try:
-        hist = fetch_history(code, start, end)
-    except Exception:
-        return None
     if hist is None or hist.empty or "Close" not in hist.columns:
         return None
     closes = hist["Close"].dropna()
@@ -1119,9 +1139,23 @@ def compute_trend_status(code: str):
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def compute_entry_quality(code: str):
-    """直近1営業日の値動きが「本物の初動」か「だまし」かを判定する。
-    陽線/陰線・出来高（直近5営業日平均比）・終値の値幅内位置・5日移動平均線との位置関係から機械的に判定する。
+def compute_trend_status(code: str):
+    """MA5・MA25・MA75の並び順（パーフェクトオーダー）と25日線からの乖離率・25日線の傾きから、
+    上昇トレンドが「確立」しているか、まだ底値圏からの反発を試している段階（未確立）かを判定する。
+    実際の計算は_trend_status_from_hist()で行う。"""
+    end = dt.date.today()
+    start = end - dt.timedelta(days=200)
+    try:
+        hist = fetch_history(code, start, end)
+    except Exception:
+        return None
+    return _trend_status_from_hist(hist)
+
+
+def _entry_quality_from_hist(hist: pd.DataFrame):
+    """直近1営業日の値動きが「本物の初動」か「だまし」かを、取得済みのOHLCV履歴
+    （末尾が最新営業日）から判定する。compute_entry_quality本体と、複数銘柄をまとめて
+    取得した履歴から計算するcompute_sector_plus_scoreの両方から使われる。
 
     戻り値: dict または None（データ不足・陰線で判定対象外の場合）
       bullish: 陽線かどうか
@@ -1130,12 +1164,6 @@ def compute_entry_quality(code: str):
       above_ma5: 終値が5日移動平均線より上かどうか
       reliable: 陽線かつ出来高・終値位置・MA5の3条件を満たすか（True=信頼度が高い初動、False=だましの可能性）
     """
-    end = dt.date.today()
-    start = end - dt.timedelta(days=60)
-    try:
-        hist = fetch_history(code, start, end)
-    except Exception:
-        return None
     if hist is None or hist.empty:
         return None
     needed = {"Open", "High", "Low", "Close", "Volume"}
@@ -1172,6 +1200,20 @@ def compute_entry_quality(code: str):
         "above_ma5": above_ma5,
         "reliable": reliable,
     }
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def compute_entry_quality(code: str):
+    """直近1営業日の値動きが「本物の初動」か「だまし」かを判定する。
+    陽線/陰線・出来高（直近5営業日平均比）・終値の値幅内位置・5日移動平均線との位置関係から機械的に判定する。
+    実際の計算は_entry_quality_from_hist()で行う。"""
+    end = dt.date.today()
+    start = end - dt.timedelta(days=60)
+    try:
+        hist = fetch_history(code, start, end)
+    except Exception:
+        return None
+    return _entry_quality_from_hist(hist)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1679,6 +1721,99 @@ def compute_sector_momentum(df: pd.DataFrame, start: dt.date, end: dt.date, samp
     rows = [
         {"sector": s, "avg_pct": sum(v) / len(v), "sample_n": len(v)}
         for s, v in sector_pcts.items()
+    ]
+    return pd.DataFrame(rows)
+
+
+# セクターの「プラス材料スコア」算出に使う、明確にポジティブな意味を持つバッジ5種
+# （🚨仕手株疑い・🚫ルール未達・⚠薄商いなど注意系のバッジは、値動きが荒い/不安定という意味であり
+#  「プラス材料」には含めない。💰信用倍率急増・🏦大量保有 新規あり は増加/減少を区別できないため除外）
+PLUS_FACTOR_LABELS = [
+    "📈 トレンド確立",
+    "✅ 出来高を伴う陽線",
+    "🎯 ルール適合",
+    "🏔 52週高値圏",
+    "🔍 静かな出来高増加",
+]
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def compute_sector_plus_score(df: pd.DataFrame, entry_rule: dict, sample_per_sector: int = 3) -> pd.DataFrame:
+    """セクターごとに代表銘柄を数本サンプリングし、明確にポジティブな意味を持つ5種のバッジ
+    （📈トレンド確立・✅出来高を伴う陽線・🎯ルール適合・🏔52週高値圏・🔍静かな出来高増加）が
+    いくつ付いているかを集計する。「セクターの勢い」（値動きの平均）とは別の切り口で、
+    アプリが検知した複数のポジティブシグナルが集中しているセクターを見つけるための指標。
+
+    銘柄ごとに個別のバッジ判定関数（compute_trend_statusなど）を呼ぶと、サンプル数が多いときに
+    通信回数が積み上がって遅くなるため、compute_sector_momentumと同様にまとめて一括取得（1回の
+    yf.download）してから、取得済みの履歴に対して判定ロジックだけを適用する。
+    （静かな出来高増加の時価総額フィルタは、追加の通信を避けるためこの集計では適用しない。）"""
+    sample_rows = df.groupby("sector", group_keys=False).head(sample_per_sector)
+    if sample_rows.empty:
+        return pd.DataFrame(columns=["sector", "plus_score", "sample_n"])
+
+    end = dt.date.today()
+    start = end - dt.timedelta(days=370)  # 52週高値判定に必要な365日分をまかなえる幅
+    tickers = [f"{c}.T" for c in sample_rows["code"]]
+    try:
+        raw = yf.download(
+            tickers,
+            start=start,
+            end=end + dt.timedelta(days=1),
+            progress=False,
+            auto_adjust=False,
+            group_by="ticker",
+            threads=True,
+        )
+    except Exception:
+        return pd.DataFrame(columns=["sector", "plus_score", "sample_n"])
+
+    sector_scores = {}
+    sector_counts = {}
+    for _, row in sample_rows.iterrows():
+        code = row["code"]
+        sector = row["sector"]
+        ticker = f"{code}.T"
+        try:
+            if isinstance(raw.columns, pd.MultiIndex):
+                if ticker not in raw.columns.get_level_values(0):
+                    continue
+                hist = raw[ticker]
+            else:
+                hist = raw
+            hist = hist.dropna(how="all")
+        except Exception:
+            continue
+        if hist.empty:
+            continue
+
+        trend_status = _trend_status_from_hist(hist)
+        entry_quality = _entry_quality_from_hist(hist)
+        quiet_flag, _quiet_reason = _quiet_accum_pattern_from_hist(hist)
+        rule_status, _reasons = evaluate_entry_rule(trend_status, entry_quality, entry_rule)
+
+        closes = hist["Close"].dropna() if "Close" in hist.columns else pd.Series(dtype=float)
+        latest_p = float(closes.iloc[-1]) if not closes.empty else None
+        high_52w = float(hist["High"].max()) if "High" in hist.columns and not hist["High"].dropna().empty else None
+
+        score = 0
+        if trend_status and trend_status.get("structure") == "perfect_order":
+            score += 1
+        if entry_quality and entry_quality.get("bullish") and entry_quality.get("reliable") is True:
+            score += 1
+        if rule_status == "pass":
+            score += 1
+        if near_52w_high_info(high_52w, latest_p) is not None:
+            score += 1
+        if quiet_flag:
+            score += 1
+
+        sector_scores[sector] = sector_scores.get(sector, 0) + score
+        sector_counts[sector] = sector_counts.get(sector, 0) + 1
+
+    rows = [
+        {"sector": s, "plus_score": sector_scores[s], "sample_n": sector_counts[s]}
+        for s in sector_scores
     ]
     return pd.DataFrame(rows)
 
@@ -2406,6 +2541,12 @@ if st.session_state["extra_stocks"]:
 else:
     master = master_base
 
+# セクターの「プラス材料スコア」（📊メインダッシュボードの「🌟 プラス材料の多いセクター」で計算・表示）を
+# デフォルト銘柄選択の並び順にも使う。ただしその場で計算すると通信待ちでサイドバー全体の表示が
+# 遅れてしまうため、ここでは前回の計算結果（st.session_state）を読むだけにする（通信は発生しない）。
+# 初回アクセス時はまだ結果がないため、業種の登録順（従来どおり）にフォールバックする。
+plus_sector_order = st.session_state.get("sector_plus_order")
+
 if "pinned_codes" not in st.session_state:
     st.session_state["pinned_codes"] = []
 
@@ -2512,7 +2653,7 @@ if view_mode == "セクターから選ぶ":
     sector_df["label"] = sector_df["code"] + " " + sector_df["name"]
 
     default_n = min(6, len(sector_df))
-    default_labels = pick_diversified_default_labels(sector_df, default_n)
+    default_labels = pick_diversified_default_labels(sector_df, default_n, sector_order=plus_sector_order)
     selected_labels = st.sidebar.multiselect(
         "銘柄",
         options=sector_df["label"].tolist(),
@@ -2759,6 +2900,53 @@ else:
         for _, r in losers.iterrows():
             render_html(_sector_row_html(r))
     st.caption("👈 気になるセクターがあれば、左のサイドバーの「業種グループ」→「セクター」で絞り込んで見てみましょう。")
+
+st.markdown("")
+
+# ---------------------------------------------------------------------------
+# プラス材料の多いセクター — 値動きではなく「アプリが検知したポジティブなバッジ」の集中度で見る
+# ---------------------------------------------------------------------------
+st.markdown("### 🌟 プラス材料の多いセクター")
+st.caption(
+    "各セクターの代表銘柄をもとに、"
+    + "・".join(PLUS_FACTOR_LABELS)
+    + "のうち、いくつのバッジが付いているかを集計したランキングです。"
+    "「セクターの勢い」（値動きの平均）とは別の切り口の目安です。"
+)
+
+with st.spinner("業種別のプラス材料を集計中…"):
+    sector_plus_df = compute_sector_plus_score(master_base, load_entry_rule())
+
+if sector_plus_df.empty:
+    st.caption("プラス材料スコアを取得できませんでした。")
+else:
+    ranked_plus = sector_plus_df.sort_values("plus_score", ascending=False).reset_index(drop=True)
+    # サイドバーのデフォルト銘柄選択は、通信待ちでサイドバー表示が遅れるのを避けるため、
+    # ここで計算した最新の順位を「次回の表示」から使う（session_stateに保存して次のrerunで反映）。
+    st.session_state["sector_plus_order"] = ranked_plus["sector"].tolist()
+
+    top_plus = ranked_plus[ranked_plus["plus_score"] > 0].head(5)
+    if top_plus.empty:
+        st.caption("現在、プラス要因バッジが付いているセクターはありません。")
+    else:
+        def _plus_row_html(r):
+            return f"""
+            <div class="stock-card" style="padding:10px 18px; margin-bottom:8px;">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span class="name" style="font-size:0.95rem;">{r['sector']}</span>
+                    <span class="pct" style="font-size:1.1rem; color:#14804a;">🌟 {int(r['plus_score'])}件</span>
+                </div>
+                <div class="price" style="margin-top:2px;">代表{int(r['sample_n'])}銘柄のサンプル中</div>
+            </div>
+            """
+
+        for _, r in top_plus.iterrows():
+            render_html(_plus_row_html(r))
+    st.caption(
+        "👈 デフォルトで表示される銘柄も、このランキングでプラス材料の多いセクターから優先的に選ばれます"
+        "（反映は次回のページ操作時からになります）。特定のセクター・銘柄を推奨するものではなく、"
+        "あくまでアプリが機械的に検知した目安です。"
+    )
 
 st.markdown("")
 
