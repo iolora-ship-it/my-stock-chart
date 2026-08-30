@@ -1539,6 +1539,81 @@ def render_rule_matched_page(entry_rule: dict, period_choice: str, start_date: d
 
 
 # ---------------------------------------------------------------------------
+# トレンド確立銘柄一覧ページ（エントリールール設定に関係なく、トレンド確立度だけで一覧化する）
+# ---------------------------------------------------------------------------
+def render_trend_established_page(period_choice: str, start_date: dt.date, end_date: dt.date):
+    """移動平均線がMA5>MA25>MA75の順に並ぶ「トレンド確立」状態の銘柄だけを、表でまとめて確認できるページ。
+    エントリールールを設定していなくても、トレンド確立銘柄をざっと見渡したいという用途向け。"""
+    st.markdown(
+        """
+        <div class="app-header">
+            <h1>📈 トレンド確立銘柄一覧</h1>
+            <p>移動平均線がMA5>MA25>MA75の順に並ぶ「トレンド確立」状態の銘柄だけを、表でまとめて確認できます。</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        f"📏 判定基準: 移動平均線がMA5>MA25>MA75の順に並ぶこと"
+        f"（25日線かい離+{TREND_EXTENDED_DEV_THRESHOLD:.0f}%以上で伸びすぎ注意）"
+    )
+
+    include_lowprice = st.checkbox(
+        "低位株・無名株の候補リストも対象に含める",
+        value=False,
+        help="オンにすると、メインの銘柄リストに加えて低位株ページの候補銘柄も調べます（その分時間がかかります）。",
+        key="trend_page_include_lowprice",
+    )
+
+    scan_master = master.drop_duplicates(subset="code")
+    if include_lowprice:
+        lowprice_master = load_master(LOWPRICE_CSV)
+        scan_master = pd.concat([scan_master, lowprice_master], ignore_index=True).drop_duplicates(subset="code")
+
+    codes_scan = scan_master["code"].tolist()
+
+    rows_te = []
+    with st.spinner(f"{len(codes_scan)}銘柄のトレンドをチェック中…"):
+        for code in codes_scan:
+            trend_status = compute_trend_status(code)
+            if not trend_status or trend_status.get("structure") != "perfect_order":
+                continue
+            name = scan_master.loc[scan_master["code"] == code, "name"].values[0]
+            sector = scan_master.loc[scan_master["code"] == code, "sector"].values[0]
+            hist = fetch_history(code, start_date, end_date)
+            pct, base_p, latest_p = pct_change_over_period(hist, start_date, end_date)
+            entry_quality = compute_entry_quality(code)
+            dev_raw = trend_status.get("dev25")
+            dev_txt = f"{dev_raw:+.1f}%" if dev_raw is not None else "―"
+            rows_te.append(
+                {
+                    "コード": code,
+                    "銘柄名": name,
+                    "セクター": sector,
+                    "現在値": f"{latest_p:,.1f}円" if latest_p is not None else "―",
+                    f"{period_choice}騰落率": f"{pct:+.2f}%" if pct is not None else "―",
+                    "25日線かい離": dev_txt,
+                    "伸びすぎ注意": "⚠" if trend_status.get("extended") else "",
+                    "初動の信頼度": "✅" if (entry_quality and entry_quality.get("reliable") is True) else "―",
+                    "Yahoo!ファイナンス": f"https://finance.yahoo.co.jp/quote/{code}.T",
+                    "_dev_raw": dev_raw if dev_raw is not None else -999,
+                }
+            )
+
+    if not rows_te:
+        st.warning("現在トレンド確立状態の銘柄はありませんでした。時間を置いて再度確認してみてください。")
+        return
+
+    st.caption(f"トレンド確立中: {len(rows_te)} / {len(codes_scan)} 銘柄")
+    df_te = pd.DataFrame(rows_te).sort_values("_dev_raw", ascending=False).drop(columns=["_dev_raw"])
+    st.dataframe(df_te, use_container_width=True, hide_index=True)
+    st.caption(
+        "※ 「伸びすぎ注意」が付いている銘柄は、短期的に上がりすぎている可能性があり、"
+        "飛びつくと高値づかみになりやすいので注意してください。今後の値上がりを保証するものではありません。"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 低位株・無名株分析ページ（サイドバーの「グループを管理」下のページ切替から表示）
 # ---------------------------------------------------------------------------
 def _build_lowprice_summary(r: dict, margin, range_pos, period_choice: str) -> str:
@@ -1649,7 +1724,7 @@ def _render_lowprice_detail(code: str, name: str, r: dict, period_choice: str, t
     st.caption("※ 上記はトレンド確立度・初動の信頼度・仕手株判定などの指標を機械的に文章化した自動要約です。生成AIによる分析ではなく、投資判断の根拠として断定的に用いないでください。")
 
 
-def render_lowprice_page(period_choice: str, start_date: dt.date, end_date: dt.date):
+def render_lowprice_page(period_choice: str, start_date: dt.date, end_date: dt.date, simple_badges: bool = True):
     """低位株・無名株分析ページ本体。メインダッシュボードとは別の候補リスト（lowprice_stocks.csv）を対象に、
     株価上限などで絞り込んだうえで、メインダッシュボードと同じ指標・カードUIで一覧表示する。"""
     st.markdown(
@@ -1782,6 +1857,12 @@ def render_lowprice_page(period_choice: str, start_date: dt.date, end_date: dt.d
         else:
             entry_badge = ""
 
+        # 「バッジを簡潔に表示」がオンのときは、優先度の低いバッジ（薄商い・初動の信頼度）を隠し、
+        # トレンド確立度・飛びつき注意・エントリールール適合など判断に直結するバッジだけを残す
+        if simple_badges:
+            thin_badge = ""
+            entry_badge = ""
+
         chasing_msg = check_chasing_risk(r["pct"], r["trend_status"], r["entry_quality"])
         chasing_badge = (
             f'<span class="badge badge-chasing" title="{GLOSSARY["飛びつき買い警告"]}">🚨 飛びつき注意</span>'
@@ -1868,6 +1949,19 @@ if "extra_stocks" not in st.session_state:
     st.session_state["extra_stocks"] = {}
 
 st.sidebar.markdown("## ⚙️ 設定")
+
+page_mode = st.sidebar.radio(
+    "📂 表示するページ",
+    ["📊 メインダッシュボード", "🔍 低位株・無名株分析", "🎯 ルール適合銘柄一覧", "📈 トレンド確立銘柄一覧"],
+    key="page_mode_select",
+)
+simple_badges = st.sidebar.checkbox(
+    "🧹 カードのバッジを簡潔に表示する",
+    value=True,
+    key="simple_badges",
+    help="薄商い・初動の信頼度バッジを非表示にして、カードをすっきり表示します。詳細は各カードの「詳しく見る」から確認できます。",
+)
+st.sidebar.markdown("---")
 
 master_base = load_master(STOCKS_CSV)
 if st.session_state["extra_stocks"]:
@@ -2115,19 +2209,16 @@ with st.sidebar.expander("🎯 エントリールール設定"):
         st.caption("条件を1つ以上オンにすると、判定が有効になります。")
     st.caption("⚠️ この設定はアプリのサーバーに保存されます。判定はあくまで機械的な目安であり、必ず守るべきルールを提案するものではありません。")
 
-st.sidebar.markdown("---")
-page_mode = st.sidebar.radio(
-    "📂 表示するページ",
-    ["📊 メインダッシュボード", "🔍 低位株・無名株分析", "🎯 ルール適合銘柄一覧"],
-    key="page_mode_select",
-)
-
 if page_mode == "🔍 低位株・無名株分析":
-    render_lowprice_page(period_choice, start_date, end_date)
+    render_lowprice_page(period_choice, start_date, end_date, simple_badges)
     st.stop()
 
 if page_mode == "🎯 ルール適合銘柄一覧":
     render_rule_matched_page(entry_rule, period_choice, start_date, end_date)
+    st.stop()
+
+if page_mode == "📈 トレンド確立銘柄一覧":
+    render_trend_established_page(period_choice, start_date, end_date)
     st.stop()
 
 # ---------------------------------------------------------------------------
@@ -2510,6 +2601,12 @@ with tab1:
         elif eq and eq.get("bullish") and eq.get("reliable") is False:
             entry_badge = f'<span class="badge badge-entry-bad" title="{GLOSSARY["初動の信頼度"]}">⚠ だまし初動の可能性</span>'
         else:
+            entry_badge = ""
+
+        # 「バッジを簡潔に表示」がオンのときは、優先度の低いバッジ（薄商い・初動の信頼度）を隠し、
+        # トレンド確立度・飛びつき注意・エントリールール適合など判断に直結するバッジだけを残す
+        if simple_badges:
+            thin_badge = ""
             entry_badge = ""
 
         chasing_msg = check_chasing_risk(r["pct"], r["trend_status"], r["entry_quality"])
