@@ -2078,19 +2078,19 @@ if "extra_stocks" not in st.session_state:
     st.session_state["extra_stocks"] = {}
 
 st.sidebar.markdown("## ⚙️ 設定")
+st.sidebar.caption("上から順番に選んでいくだけで表示が切り替わります。")
 
+st.sidebar.markdown("### ① どこを見る？")
 page_mode = st.sidebar.radio(
-    "📂 表示するページ",
+    "ページを選ぶ",
     ["📊 メインダッシュボード", "🔍 低位株・無名株分析", "🎯 ルール適合銘柄一覧", "📈 トレンド確立銘柄一覧"],
     key="page_mode_select",
+    label_visibility="collapsed",
 )
-simple_badges = st.sidebar.checkbox(
-    "🧹 カードのバッジを簡潔に表示する",
-    value=True,
-    key="simple_badges",
-    help="薄商い・初動の信頼度バッジを非表示にして、カードをすっきり表示します。詳細は各カードの「詳しく見る」から確認できます。",
-)
+st.sidebar.caption("はじめての場合は「📊 メインダッシュボード」でOKです。")
 st.sidebar.markdown("---")
+
+st.sidebar.markdown("### ② どの銘柄を見る？")
 
 master_base = load_master(STOCKS_CSV)
 if st.session_state["extra_stocks"]:
@@ -2107,65 +2107,64 @@ else:
 if "pinned_codes" not in st.session_state:
     st.session_state["pinned_codes"] = []
 
-st.sidebar.markdown("### 🔍 銘柄を検索して追加")
-search_query = st.sidebar.text_input(
-    "銘柄名 または 証券コードで検索",
-    key="stock_search_query",
-    placeholder="例: トヨタ / 7203 / 285A",
-)
+with st.sidebar.expander("🔍 銘柄名・コードで検索して追加"):
+    search_query = st.text_input(
+        "銘柄名 または 証券コードで検索",
+        key="stock_search_query",
+        placeholder="例: トヨタ / 7203 / 285A",
+    )
 
-if search_query.strip():
-    q = search_query.strip()
-    q_upper = q.upper()
-    match_df = master[
-        master["name"].str.contains(q, case=False, na=False, regex=False)
-        | master["code"].str.upper().str.contains(q_upper, na=False, regex=False)
-    ].head(8)
+    if search_query.strip():
+        q = search_query.strip()
+        q_upper = q.upper()
+        match_df = master[
+            master["name"].str.contains(q, case=False, na=False, regex=False)
+            | master["code"].str.upper().str.contains(q_upper, na=False, regex=False)
+        ].head(8)
 
-    if not match_df.empty:
-        st.sidebar.caption(f"「{q}」に一致する銘柄（{len(match_df)}件）")
-        for _, m in match_df.iterrows():
-            already = m["code"] in st.session_state["pinned_codes"]
-            c1, c2 = st.sidebar.columns([3, 1])
-            c1.write(f"{m['code']} {m['name']}")
-            if already:
-                c2.markdown("✅")
-            else:
-                if c2.button("＋", key=f"pin_{m['code']}", help="この銘柄を今すぐ一覧に追加"):
-                    st.session_state["pinned_codes"].append(m["code"])
-                    st.rerun()
-    else:
-        with st.sidebar:
-            with st.spinner("ネットで検索中…"):
-                online_results = search_ticker_by_name(q)
-        online_results = [
-            (c, n) for c, n in online_results if c not in master["code"].values
-        ]
-        if online_results:
-            st.sidebar.caption(f"ネット検索の候補（{len(online_results)}件）")
-            for code, name in online_results:
-                already = code in st.session_state["pinned_codes"]
-                c1, c2 = st.sidebar.columns([3, 1])
-                c1.write(f"{code} {name}")
+        if not match_df.empty:
+            st.caption(f"「{q}」に一致する銘柄（{len(match_df)}件）")
+            for _, m in match_df.iterrows():
+                already = m["code"] in st.session_state["pinned_codes"]
+                c1, c2 = st.columns([3, 1])
+                c1.write(f"{m['code']} {m['name']}")
                 if already:
                     c2.markdown("✅")
                 else:
-                    if c2.button("＋", key=f"onlinepin_{code}", help="この銘柄を今すぐ一覧に追加"):
-                        st.session_state["extra_stocks"][code] = name
-                        st.session_state["pinned_codes"].append(code)
+                    if c2.button("＋", key=f"pin_{m['code']}", help="この銘柄を今すぐ一覧に追加"):
+                        st.session_state["pinned_codes"].append(m["code"])
                         st.rerun()
         else:
-            st.sidebar.caption("見つかりませんでした。証券コードが分かれば下で直接検索できます。")
-            if st.sidebar.button(f"証券コード「{q_upper}」として検索する", key="new_code_search_btn"):
-                name = fetch_company_name(q_upper)
-                if name:
-                    st.session_state["extra_stocks"][q_upper] = name
-                    if q_upper not in st.session_state["pinned_codes"]:
-                        st.session_state["pinned_codes"].append(q_upper)
-                    st.sidebar.success(f"「{name}」({q_upper}) を追加しました。")
-                    st.rerun()
-                else:
-                    st.sidebar.error("データが見つかりませんでした。会社名の表記や証券コードをご確認ください。")
+            with st.spinner("ネットで検索中…"):
+                online_results = search_ticker_by_name(q)
+            online_results = [
+                (c, n) for c, n in online_results if c not in master["code"].values
+            ]
+            if online_results:
+                st.caption(f"ネット検索の候補（{len(online_results)}件）")
+                for code, name in online_results:
+                    already = code in st.session_state["pinned_codes"]
+                    c1, c2 = st.columns([3, 1])
+                    c1.write(f"{code} {name}")
+                    if already:
+                        c2.markdown("✅")
+                    else:
+                        if c2.button("＋", key=f"onlinepin_{code}", help="この銘柄を今すぐ一覧に追加"):
+                            st.session_state["extra_stocks"][code] = name
+                            st.session_state["pinned_codes"].append(code)
+                            st.rerun()
+            else:
+                st.caption("見つかりませんでした。証券コードが分かれば下で直接検索できます。")
+                if st.button(f"証券コード「{q_upper}」として検索する", key="new_code_search_btn"):
+                    name = fetch_company_name(q_upper)
+                    if name:
+                        st.session_state["extra_stocks"][q_upper] = name
+                        if q_upper not in st.session_state["pinned_codes"]:
+                            st.session_state["pinned_codes"].append(q_upper)
+                        st.success(f"「{name}」({q_upper}) を追加しました。")
+                        st.rerun()
+                    else:
+                        st.error("データが見つかりませんでした。会社名の表記や証券コードをご確認ください。")
 
 if st.session_state["pinned_codes"]:
     st.sidebar.markdown("**📌 追加した銘柄（下の一覧に自動で表示されます）**")
@@ -2245,11 +2244,14 @@ for c in st.session_state["pinned_codes"]:
         selected_codes.append(c)
         selected_labels.append(f"{c} {nm}")
 
+st.sidebar.markdown("---")
+st.sidebar.markdown("### ③ どの期間で見る？")
 period_choice = st.sidebar.radio(
-    "期間",
+    "期間を選ぶ",
     list(PERIOD_PRESETS.keys()),
     index=3,
     horizontal=True,
+    label_visibility="collapsed",
 )
 
 today = dt.date.today()
@@ -2270,6 +2272,17 @@ else:
     end_date = today
 
 st.sidebar.markdown("---")
+st.sidebar.markdown("### ④ その他の設定")
+st.sidebar.caption("普段は触らなくて大丈夫です。必要なときだけ開いてください。")
+
+with st.sidebar.expander("🧹 カードの表示設定"):
+    simple_badges = st.checkbox(
+        "バッジを簡潔に表示する",
+        value=True,
+        key="simple_badges",
+        help="薄商い・初動の信頼度バッジを非表示にして、カードをすっきり表示します。詳細は各カードの「詳しく見る」から確認できます。",
+    )
+
 with st.sidebar.expander("⭐ グループを管理"):
     new_group_name = st.text_input("新しいグループ名", key="new_group_name")
     if st.button("グループを作成", key="create_group_btn"):
@@ -2306,7 +2319,6 @@ with st.sidebar.expander("⭐ グループを管理"):
             st.rerun()
     st.caption("⚠️ グループ情報はアプリのサーバーに保存されます。今後アプリの機能追加・修正で更新すると、リセットされる場合があります。")
 
-st.sidebar.markdown("---")
 with st.sidebar.expander("🎯 エントリールール設定"):
     st.caption(
         "「なんとなく上がりそうだから買う」を減らすために、自分で買ってよい条件を決めておけます。"
