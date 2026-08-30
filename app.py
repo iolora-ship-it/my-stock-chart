@@ -33,6 +33,7 @@ import json
 import os
 import re
 import time
+import urllib.parse
 import uuid
 
 import pandas as pd
@@ -44,17 +45,17 @@ import yfinance as yf
 
 st.set_page_config(page_title="My Stock Chart", layout="wide", page_icon="📈")
 
-# 「🔥 セクターの勢い」「🌟 プラス材料の多いセクター」の「見る」ボタンから、そのセクターに
-# 絞り込んでジャンプする処理。サイドバーのウィジェット（view_mode_radio等）は既に一度
-# 描画された後だと、そのkeyのsession_stateを直接書き換えられない（StreamlitAPIException）ため、
-# ボタン押下時は一旦「_pending_sector_jump」に行き先だけを覚えてrerunし、
-# 次のスクリプト実行の一番最初（ウィジェットがまだ何も描画されていないタイミング）で
-# ここから実際のウィジェットのkeyに反映する。
-if "_pending_sector_jump" in st.session_state:
-    _pending_sector = st.session_state.pop("_pending_sector_jump")
+# 「🔥 セクターの勢い」「🌟 プラス材料の多いセクター」のセクター名をクリックすると、
+# そのセクターに絞り込んでジャンプする（?jump_sector=セクター名 というリンクとして描画している）。
+# サイドバーのウィジェット（view_mode_radio等）は、一度描画された後だとそのkeyのsession_stateを
+# 直接書き換えられない（StreamlitAPIException）ため、スクリプトの一番最初
+# （ウィジェットがまだ何も描画されていないタイミング）でクエリパラメータを読み取って反映する。
+_qp_jump_sector = st.query_params.get("jump_sector")
+if _qp_jump_sector:
     st.session_state["view_mode_radio"] = "セクターから選ぶ"
     st.session_state["sector_group_select"] = "すべて"
-    st.session_state["sector_select_すべて"] = _pending_sector
+    st.session_state["sector_select_すべて"] = _qp_jump_sector
+    st.query_params.clear()
 
 STOCKS_CSV = "stocks.csv"
 LOWPRICE_CSV = "lowprice_stocks.csv"
@@ -233,31 +234,19 @@ def render_html(html: str):
     st.markdown("\n".join(lines), unsafe_allow_html=True)
 
 
-def jump_to_sector(sector_name: str):
-    """「セクターの勢い」「プラス材料の多いセクター」の一覧から、そのセクターに絞り込んだ表示へ
-    ジャンプする。この時点ではサイドバーのウィジェットが既に描画済みのため、対応するウィジェットの
-    keyを直接書き換えることはできない（StreamlitAPIException）。そのため行き先だけを
-    「_pending_sector_jump」に覚えてrerunし、実際のsession_state反映はスクリプトの一番最初
-    （ウィジェットがまだ描画されていないタイミング）で行う。"""
-    st.session_state["_pending_sector_jump"] = sector_name
-    st.rerun()
-
-
-def render_sector_jump_row(sector: str, card_html: str, key_prefix: str):
-    """セクター名・カードのHTML・ボタンキーの接頭辞を受け取り、右端の「見る」ボタンを押すと
-    そのセクターに絞り込んでジャンプできる行を描画する
-    （🔥セクターの勢い・🌟プラス材料の多いセクターの両方から使う共通部品）。"""
-    row_col, btn_col = st.columns([5, 1])
-    with row_col:
-        render_html(card_html)
-    with btn_col:
-        if st.button(
-            "見る",
-            key=f"{key_prefix}_{sector}",
-            help=f"「{sector}」に絞り込んで表示します",
-            use_container_width=True,
-        ):
-            jump_to_sector(sector)
+def render_sector_jump_row(sector: str, card_html: str):
+    """セクター名・カードのHTMLを受け取り、カード全体をクリックするとそのセクターに絞り込んで
+    ジャンプできる行を描画する（🔥セクターの勢い・🌟プラス材料の多いセクターの両方から使う共通部品）。
+    「?jump_sector=セクター名」というリンクとして描画し、ジャンプ先の反映はスクリプトの一番最初
+    （st.set_page_config直後のクエリパラメータ処理）で行う。"""
+    encoded = urllib.parse.quote(sector, safe="")
+    linked_html = (
+        f'<a href="?jump_sector={encoded}" target="_self" '
+        f'style="text-decoration:none; color:inherit; display:block; cursor:pointer;">'
+        f"{card_html}"
+        f"</a>"
+    )
+    render_html(linked_html)
 
 PERIOD_PRESETS = {
     "1日": 1,
@@ -2284,7 +2273,11 @@ def _render_lowprice_detail(code: str, name: str, r: dict, period_choice: str, t
             showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="right", x=1),
             xaxis_rangeslider_visible=False,
         )
-        fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+        fig.update_xaxes(
+            rangebreaks=[dict(bounds=["sat", "mon"])],
+            dtick=7 * 24 * 60 * 60 * 1000,  # 1週間ごとに目盛りを表示
+            tickformat="%m/%d",
+        )
         st.plotly_chart(fig, use_container_width=True, key=f"lowprice_minichart_{code}")
         st.caption("直近90日の簡易チャートです。より詳しい期間指定やRSI等は「📊 メインダッシュボード」の「🕯️ 個別チャート」タブでご覧いただけます。")
 
@@ -2411,6 +2404,7 @@ def render_lowprice_page(
         return
 
     st.caption(f"表示中: {len(df_lp)} / {len(codes_lp)} 銘柄（株価{price_max:,}円以下）")
+    st.caption("💡 バッジの意味は、カーソルを合わせると説明が出ます。スマホなど反応しない場合は、「📊 メインダッシュボード」の「📖 用語集」でまとめて確認できます。")
 
     for _, r in df_lp.iterrows():
         color = pct_color(r["pct"])
@@ -2937,12 +2931,12 @@ else:
     with col_g:
         st.markdown("**📈 勢いのあるセクター（上昇幅が大きい）**")
         for _, r in gainers.iterrows():
-            render_sector_jump_row(r["sector"], _sector_row_html(r), "jump_gainer")
+            render_sector_jump_row(r["sector"], _sector_row_html(r))
     with col_l:
         st.markdown("**📉 勢いのないセクター（下落幅が大きい）**")
         for _, r in losers.iterrows():
-            render_sector_jump_row(r["sector"], _sector_row_html(r), "jump_loser")
-    st.caption("👈 セクター名の横の「見る」を押すと、そのセクターに絞り込んで表示します（左サイドバーからも「業種グループ」→「セクター」で絞り込めます）。")
+            render_sector_jump_row(r["sector"], _sector_row_html(r))
+    st.caption("👈 セクターのカードをクリックすると、そのセクターに絞り込んで表示します（左サイドバーからも「業種グループ」→「セクター」で絞り込めます）。")
 
 st.markdown("")
 
@@ -2984,9 +2978,9 @@ else:
             """
 
         for _, r in top_plus.iterrows():
-            render_sector_jump_row(r["sector"], _plus_row_html(r), "jump_plus")
+            render_sector_jump_row(r["sector"], _plus_row_html(r))
     st.caption(
-        "👈 セクター名の横の「見る」を押すと、そのセクターに絞り込んで表示します。"
+        "👈 セクターのカードをクリックすると、そのセクターに絞り込んで表示します。"
         "デフォルトで表示される銘柄も、このランキングでプラス材料の多いセクターから優先的に選ばれます"
         "（反映は次回のページ操作時からになります）。特定のセクター・銘柄を推奨するものではなく、"
         "あくまでアプリが機械的に検知した目安です。"
@@ -3172,7 +3166,11 @@ def render_quick_detail(code: str, name: str, r: dict):
             legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="right", x=1),
             xaxis_rangeslider_visible=False,
         )
-        fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+        fig.update_xaxes(
+            rangebreaks=[dict(bounds=["sat", "mon"])],
+            dtick=7 * 24 * 60 * 60 * 1000,  # 1週間ごとに目盛りを表示
+            tickformat="%m/%d",
+        )
         st.plotly_chart(fig, use_container_width=True, key=f"tab1_minichart_{code}")
         st.caption("直近90日の簡易チャートです。より詳しい期間指定やRSI等は「🕯️ 個別チャート」タブでご覧いただけます。")
 
@@ -3272,6 +3270,7 @@ with tab1:
         st.warning("絞り込み条件に一致する銘柄がありませんでした。条件を緩めてみてください。")
     else:
         st.caption(f"表示中: {len(filtered_df)} / {len(result_df)} 銘柄")
+        st.caption("💡 バッジの意味は、カーソルを合わせると説明が出ます。スマホなど反応しない場合は、上の「📖 用語集」でまとめて確認できます。")
 
     for _, r in filtered_df.iterrows():
         color = pct_color(r["pct"])
