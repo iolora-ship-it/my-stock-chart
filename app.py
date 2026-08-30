@@ -569,6 +569,42 @@ def inject_style():
             color: #3730a3;
             margin-left: 6px;
         }
+        /* 決算間近・52週高値圏・信用倍率急増・大量保有報告書は、判断に直結するバッジと違い
+           あくまで参考情報のため、増えすぎてカードが見づらくならないよう折りたたみにまとめる。
+           <details>/<summary>はJS不要のブラウザ標準機能で、st.markdown(unsafe_allow_html)でも
+           そのまま動作する。 */
+        .stock-card details.extra-badges {
+            display: inline-block;
+            margin-left: 6px;
+            vertical-align: top;
+        }
+        .stock-card details.extra-badges summary {
+            display: inline-block;
+            list-style: none;
+            cursor: pointer;
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 3px 10px;
+            border-radius: 999px;
+            background: #eef1f6;
+            color: #4b5563;
+        }
+        .stock-card details.extra-badges summary::-webkit-details-marker {
+            display: none;
+        }
+        .stock-card details.extra-badges summary::marker {
+            content: "";
+        }
+        .stock-card details.extra-badges[open] summary {
+            background: #dde3ee;
+        }
+        .stock-card details.extra-badges .extra-badges-content {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            justify-content: flex-end;
+            margin-top: 6px;
+        }
         .stock-card .fundamentals-row {
             margin-top: 10px;
             padding-top: 10px;
@@ -713,6 +749,18 @@ def inject_style():
             .stock-card .badge-edinet {
                 margin-left: 0;
                 margin-right: 6px;
+            }
+            .stock-card details.extra-badges {
+                margin-left: 0;
+                margin-right: 6px;
+                margin-top: 4px;
+            }
+            .stock-card details.extra-badges summary {
+                font-size: 0.7rem;
+                padding: 3px 8px;
+            }
+            .stock-card details.extra-badges .extra-badges-content {
+                justify-content: flex-start;
             }
             .stock-card .fundamentals-row {
                 gap: 6px 10px;
@@ -1268,7 +1316,11 @@ def margin_spike_info(margin: dict):
 
 def build_extra_badges(earnings_soon, near_high, margin_spike, edinet_new: bool) -> str:
     """決算間近・52週高値圏・信用倍率急増・大量保有報告書のバッジHTMLをまとめて返す。
-    引数がNone/Falseのものはバッジを出さない。"""
+    引数がNone/Falseのものはバッジを出さない。
+
+    これらは「トレンド確立度」「飛びつき注意」「ルール適合」のような判断に直結するバッジとは違い、
+    あくまで参考情報の位置づけのため、バッジがどんどん増えてカードが見づらくなるのを防ぐよう、
+    折りたたみ（<details>）の中にまとめて表示する（クリックで開くまでは件数だけの1チップ）。"""
     parts = []
     if earnings_soon:
         next_date, days_left = earnings_soon
@@ -1283,7 +1335,12 @@ def build_extra_badges(earnings_soon, near_high, margin_spike, edinet_new: bool)
         )
     if edinet_new:
         parts.append(f'<span class="badge badge-edinet" title="{GLOSSARY["大量保有報告書 新規あり"]}">🏦 大量保有 新規あり</span>')
-    return "".join(parts)
+    if not parts:
+        return ""
+    return (
+        f'<details class="extra-badges"><summary>📋 参考情報 他{len(parts)}件</summary>'
+        f'<div class="extra-badges-content">{"".join(parts)}</div></details>'
+    )
 
 
 def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
