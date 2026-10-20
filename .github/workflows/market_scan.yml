@@ -1,0 +1,42 @@
+name: 市場スキャン（低位株発掘バッチ）
+
+on:
+  schedule:
+    # 毎週平日 UTC 09:00 = 日本時間 18:00（東証の取引終了後）に自動実行
+    - cron: "0 9 * * 1-5"
+  workflow_dispatch: {}  # Actionsの画面から手動実行したいとき用
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: リポジトリを取得
+        uses: actions/checkout@v4
+
+      - name: Pythonをセットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: 依存パッケージをインストール
+        run: pip install -r requirements.txt
+
+      - name: 市場スキャンを実行
+        run: python scripts/scan_market.py
+
+      - name: 結果が変化していればコミット
+        run: |
+          git config user.name "market-scan-bot"
+          git config user.email "actions@users.noreply.github.com"
+          if git diff --quiet -- market_scan_results.csv; then
+            echo "変化なし。コミットをスキップします。"
+          else
+            git add market_scan_results.csv
+            git commit -m "市場スキャン結果を更新 ($(date -u +'%Y-%m-%d %H:%M UTC'))"
+            git push
+          fi
