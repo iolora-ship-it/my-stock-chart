@@ -2116,18 +2116,12 @@ def get_latest_price(code: str):
 # ルール適合銘柄一覧ページ（エントリールール設定を満たす銘柄を表でまとめて確認する）
 # ---------------------------------------------------------------------------
 def render_rule_matched_page(entry_rule: dict, period_choice: str, start_date: dt.date, end_date: dt.date):
-    """サイドバーの「🎯 エントリールール設定」で決めた条件を満たす銘柄だけを、
-    銘柄ごとのバッジではなく表形式でまとめて確認できるページ。
-    バッジだと銘柄を1つずつ開いて確認する必要があり分かりにくいという声を受けて追加した。"""
-    st.markdown(
-        """
-        <div class="app-header">
-            <h1>🎯 ルール適合銘柄一覧</h1>
-            <p>サイドバーの「🎯 エントリールール設定」で決めた条件を満たす銘柄だけを、表でまとめて確認できます。</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    """「ルール適合」条件タブの本体。サイドバーの「🎯 エントリールール設定」で決めた条件を満たす銘柄だけを、
+    銘柄ごとのバッジではなく表形式でまとめて確認できる。
+    バッジだと銘柄を1つずつ開いて確認する必要があり分かりにくいという声を受けて追加した。
+    「🎯 条件でさがす」ページの条件切り替えから呼び出される（render_condition_search_page参照）。"""
+    st.markdown("#### 🎯 ルール適合銘柄")
+    st.caption("サイドバーの「🎯 エントリールール設定」で決めた条件を満たす銘柄だけを、表でまとめて確認できます。")
 
     if not entry_rule.get("require_trend") and not entry_rule.get("require_entry"):
         st.info(
@@ -2213,17 +2207,11 @@ def render_rule_matched_page(entry_rule: dict, period_choice: str, start_date: d
 # トレンド確立銘柄一覧ページ（エントリールール設定に関係なく、トレンド確立度だけで一覧化する）
 # ---------------------------------------------------------------------------
 def render_trend_established_page(period_choice: str, start_date: dt.date, end_date: dt.date):
-    """移動平均線がMA5>MA25>MA75の順に並ぶ「トレンド確立」状態の銘柄だけを、表でまとめて確認できるページ。
-    エントリールールを設定していなくても、トレンド確立銘柄をざっと見渡したいという用途向け。"""
-    st.markdown(
-        """
-        <div class="app-header">
-            <h1>📈 トレンド確立銘柄一覧</h1>
-            <p>移動平均線がMA5>MA25>MA75の順に並ぶ「トレンド確立」状態の銘柄だけを、表でまとめて確認できます。</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    """「トレンド確立」条件タブの本体。移動平均線がMA5>MA25>MA75の順に並ぶ「トレンド確立」状態の銘柄だけを、
+    表でまとめて確認できる。エントリールールを設定していなくても、トレンド確立銘柄をざっと見渡したいという用途向け。
+    「🎯 条件でさがす」ページの条件切り替えから呼び出される（render_condition_search_page参照）。"""
+    st.markdown("#### 📈 トレンド確立銘柄")
+    st.caption("移動平均線がMA5>MA25>MA75の順に並ぶ「トレンド確立」状態の銘柄だけを、表でまとめて確認できます。")
     st.caption(
         f"📏 判定基準: 移動平均線がMA5>MA25>MA75の順に並ぶこと"
         f"（25日線かい離+{TREND_EXTENDED_DEV_THRESHOLD:.0f}%以上で伸びすぎ注意）"
@@ -2282,6 +2270,39 @@ def render_trend_established_page(period_choice: str, start_date: dt.date, end_d
         "※ 「伸びすぎ注意」が付いている銘柄は、短期的に上がりすぎている可能性があり、"
         "飛びつくと高値づかみになりやすいので注意してください。今後の値上がりを保証するものではありません。"
     )
+
+
+# ---------------------------------------------------------------------------
+# 条件でさがすページ（「🎯 ルール適合銘柄一覧」「📈 トレンド確立銘柄一覧」を1ページに統合）
+# ---------------------------------------------------------------------------
+def render_condition_search_page(entry_rule: dict, period_choice: str, start_date: dt.date, end_date: dt.date):
+    """メインの銘柄リストを、ある条件でフィルタして一覧表示するページ。
+    以前は「🎯 ルール適合銘柄一覧」「📈 トレンド確立銘柄一覧」という2つの別ページだったが、
+    どちらも「同じ銘柄リストを、1つの条件でフィルタして表にする」という構造が同じで分かりにくいという
+    指摘を受け、1ページにまとめて条件をドロップダウンで切り替える形にした
+    （条件を今後増やしたくなっても、ページを増やさずに選択肢を足すだけで済む）。"""
+    st.markdown(
+        """
+        <div class="app-header">
+            <h1>🎯 条件でさがす</h1>
+            <p>メインの銘柄リストを、選んだ条件でフィルタして表にまとめて確認できます。</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    condition = st.radio(
+        "条件を選ぶ",
+        ["🎯 ルール適合", "📈 トレンド確立"],
+        horizontal=True,
+        key="condition_search_mode",
+    )
+    st.markdown("---")
+    if condition == "🎯 ルール適合":
+        render_rule_matched_page(entry_rule, period_choice, start_date, end_date)
+    else:
+        render_trend_established_page(period_choice, start_date, end_date)
+
+    st.caption("👈 メインダッシュボードに戻るには、左のサイドバーの「表示するページ」を切り替えてください。")
 
 
 # ---------------------------------------------------------------------------
@@ -2510,17 +2531,11 @@ def render_lowprice_page(
     simple_badges: bool = True,
     check_extra_signals: bool = False,
 ):
-    """低位株・無名株分析ページ本体。メインダッシュボードとは別の候補リスト（lowprice_stocks.csv）を対象に、
-    株価上限などで絞り込んだうえで、メインダッシュボードと同じ指標・カードUIで一覧表示する。"""
-    st.markdown(
-        """
-        <div class="app-header">
-            <h1>🔍 低位株・無名株分析</h1>
-            <p>株価が低い・知名度がまだ高くない東証銘柄の候補リストです。メインダッシュボードと同じ指標（トレンド確立度・出来高・信用残など）で確認できます。</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    """低位株・無名株分析（厳選リスト）タブの本体。メインダッシュボードとは別の候補リスト（lowprice_stocks.csv）を対象に、
+    株価上限などで絞り込んだうえで、メインダッシュボードと同じ指標・カードUIで一覧表示する。
+    「🔍 低位株を探す」ページの候補ソース切り替えから呼び出される（render_lowprice_hub_page参照）。"""
+    st.markdown("#### 🗂 厳選リストから探す")
+    st.caption("株価が低い・知名度がまだ高くない東証銘柄の候補リストです。メインダッシュボードと同じ指標（トレンド確立度・出来高・信用残など）で確認できます。")
     st.caption(
         "掲載銘柄は、Yahoo!ファイナンスの「単元株価格下位」「時価総額下位」ランキング（2026年8月時点）を基に、"
         "時価総額が極端に小さい銘柄（目安として時価総額10億円未満）や、臨床段階で製品売上のないバイオベンチャーなど"
@@ -2730,8 +2745,6 @@ def render_lowprice_page(
 
         st.markdown("")
 
-    st.caption("👈 メインダッシュボードに戻るには、左のサイドバーの「表示するページ」を切り替えてください。")
-
 
 # ---------------------------------------------------------------------------
 # 市場スキャンページ（東証全銘柄を対象にした夜間バッチの結果を表示する）
@@ -2753,18 +2766,12 @@ def load_market_scan_results() -> pd.DataFrame:
 
 
 def render_market_scan_page(period_choice: str, start_date: dt.date, end_date: dt.date, today_local: dt.date):
-    """市場スキャンページ本体。stocks.csvには登録していない銘柄も含めて、東証の全上場銘柄
+    """市場スキャン（全市場自動スキャン）タブの本体。stocks.csvには登録していない銘柄も含めて、東証の全上場銘柄
     （ETF・REITなどを除く約3,700銘柄）の中から、GitHub Actionsの夜間バッチが
-    「まだ注目されていなさそうな低位株」として検出した銘柄を一覧表示する。"""
-    st.markdown(
-        """
-        <div class="app-header">
-            <h1>🕵️ 市場スキャン（低位株発掘）</h1>
-            <p>東証の全上場銘柄を対象に、毎晩自動で「まだ注目されていなさそうな低位株」を探した結果です。</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    「まだ注目されていなさそうな低位株」として検出した銘柄を一覧表示する。
+    「🔍 低位株を探す」ページの候補ソース切り替えから呼び出される（render_lowprice_hub_page参照）。"""
+    st.markdown("#### 🌐 全市場自動スキャンから探す")
+    st.caption("東証の全上場銘柄を対象に、毎晩自動で「まだ注目されていなさそうな低位株」を探した結果です。")
     st.caption("💡 " + GLOSSARY["市場スキャン"])
 
     df_scan = load_market_scan_results()
@@ -2879,9 +2886,51 @@ def render_market_scan_page(period_choice: str, start_date: dt.date, end_date: d
 
     st.caption(
         "⚠ このページの銘柄は時価総額や事業内容によるスクリーニングを行っていません"
-        "（低位株ページの候補リストとは異なり、機械的な出来高シグナルのみで抽出しています）。"
+        "（厳選リストとは異なり、機械的な出来高シグナルのみで抽出しています）。"
         "薄商いの銘柄や、上場間もなく実績の少ない銘柄も含まれるため、値動きが荒くなりやすい点にご注意のうえご自身で判断してください。"
     )
+
+
+# ---------------------------------------------------------------------------
+# 低位株を探すページ（「🔍 低位株・無名株分析」「🕵️ 市場スキャン」を1ページに統合）
+# ---------------------------------------------------------------------------
+def render_lowprice_hub_page(
+    period_choice: str,
+    start_date: dt.date,
+    end_date: dt.date,
+    today_local: dt.date,
+    simple_badges: bool = True,
+    check_extra_signals: bool = False,
+):
+    """「まだ注目されていなさそうな低位株を探す」という同じ目的を持つ2つの候補ソース
+    （🗂 厳選リスト＝lowprice_stocks.csv、🌐 全市場自動スキャン＝market_scan_results.csv）を、
+    候補ソースの切り替えとしてまとめたページ。以前は別ページだったが、
+    「低位株を探す」という目的が同じでページだけ分かれているのは分かりにくいという指摘を受けて統合した。"""
+    st.markdown(
+        """
+        <div class="app-header">
+            <h1>🔍 低位株を探す</h1>
+            <p>株価が低い・まだ注目されていなさそうな東証銘柄を、候補ソースを切り替えながら確認できます。</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    source = st.radio(
+        "候補の出どころを選ぶ",
+        ["🗂 厳選リスト（手動選定）", "🌐 全市場自動スキャン"],
+        horizontal=True,
+        key="lowprice_hub_source",
+        help=(
+            "🗂 厳選リスト: 時価総額や事業内容を踏まえて手動で選んだ候補リストです。"
+            "🌐 全市場自動スキャン: 東証の全上場銘柄を対象に、GitHub Actionsが毎晩自動でスクリーニングした結果です。"
+        ),
+    )
+    st.markdown("---")
+    if source == "🗂 厳選リスト（手動選定）":
+        render_lowprice_page(period_choice, start_date, end_date, simple_badges, check_extra_signals)
+    else:
+        render_market_scan_page(period_choice, start_date, end_date, today_local)
+
     st.caption("👈 メインダッシュボードに戻るには、左のサイドバーの「表示するページ」を切り替えてください。")
 
 
@@ -2912,7 +2961,7 @@ st.sidebar.caption("上から順番に選んでいくだけで表示が切り替
 st.sidebar.markdown("### ① どこを見る？")
 page_mode = st.sidebar.radio(
     "ページを選ぶ",
-    ["📊 メインダッシュボード", "🔍 低位株・無名株分析", "🎯 ルール適合銘柄一覧", "📈 トレンド確立銘柄一覧", "🗺️ マーケットヒートマップ", "🕵️ 市場スキャン"],
+    ["📊 メインダッシュボード", "🔍 低位株を探す", "🎯 条件でさがす", "🗺️ マーケットヒートマップ"],
     key="page_mode_select",
     label_visibility="collapsed",
 )
@@ -3147,7 +3196,7 @@ with st.sidebar.expander("🧹 カードの表示設定"):
         help=(
             "オンにすると、各銘柄の信用残（かぶたんのデータ）とEDINETの大量保有報告書（要APIキー設定）も"
             "あわせて確認し、「💰 信用買い残急増」「🏦 大量保有 新規あり」バッジを表示します。"
-            "銘柄数が多いページ（低位株・無名株分析など）では、その分表示に時間がかかります。"
+            "銘柄数が多いページ（低位株を探すなど）では、その分表示に時間がかかります。"
         ),
     )
 
@@ -3240,24 +3289,16 @@ with st.sidebar.expander("🎯 エントリールール設定"):
         st.caption("条件を1つ以上オンにすると、判定が有効になります。")
     st.caption("⚠️ この設定はアプリのサーバーに保存されます。判定はあくまで機械的な目安であり、必ず守るべきルールを提案するものではありません。")
 
-if page_mode == "🔍 低位株・無名株分析":
-    render_lowprice_page(period_choice, start_date, end_date, simple_badges, check_extra_signals)
+if page_mode == "🔍 低位株を探す":
+    render_lowprice_hub_page(period_choice, start_date, end_date, today, simple_badges, check_extra_signals)
     st.stop()
 
-if page_mode == "🎯 ルール適合銘柄一覧":
-    render_rule_matched_page(entry_rule, period_choice, start_date, end_date)
-    st.stop()
-
-if page_mode == "📈 トレンド確立銘柄一覧":
-    render_trend_established_page(period_choice, start_date, end_date)
+if page_mode == "🎯 条件でさがす":
+    render_condition_search_page(entry_rule, period_choice, start_date, end_date)
     st.stop()
 
 if page_mode == "🗺️ マーケットヒートマップ":
     render_market_heatmap_page(period_choice, start_date, end_date)
-    st.stop()
-
-if page_mode == "🕵️ 市場スキャン":
-    render_market_scan_page(period_choice, start_date, end_date, today)
     st.stop()
 
 # ---------------------------------------------------------------------------
@@ -4599,7 +4640,7 @@ with tab6:
                 if rushed_avg_pl < other_avg_pl:
                     st.caption(
                         "💡 焦って買った取引の方が平均損益が悪い傾向です。「🎯 エントリールール設定」で条件を必須にする、"
-                        "あるいは「🎯 ルール適合銘柄一覧」で条件を満たす銘柄だけを検討するなど、"
+                        "あるいは「🎯 条件でさがす」で条件を満たす銘柄だけを検討するなど、"
                         "飛びつき買いを減らす工夫を試してみてください。"
                     )
 
