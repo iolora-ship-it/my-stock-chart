@@ -130,6 +130,12 @@ GLOSSARY = {
         "値動きが大きいこと自体に変わりはないため、飛びつく前に材料や需給を確認することをおすすめします。"
     ),
     "52週レンジ": "過去52週間（約1年間）の最高値・最安値です。現在値がそのレンジのどのあたりに位置するかで、直近の相対的な高値圏・安値圏を把握する目安になります。",
+    "マーケットヒートマップ": (
+        "登録銘柄をセクターごとにブロックで並べ、色と大きさで値動きを一覧できる表示です。"
+        "色は国内の値動き表示の慣習に合わせて、上昇=赤、下落=青にしています（海外の投資ツールでは逆の配色が多いので注意）。"
+        "ブロックの大きさは時価総額ではなく、直近の売買代金（終値×出来高）の目安です"
+        "（時価総額だと銘柄ごとに別途データ取得が必要になり、登録銘柄数が多いと表示が大きく遅くなるため）。"
+    ),
     "トレンド確立度": (
         "5日・25日・75日移動平均線の並び順（短期>中期>長期＝パーフェクトオーダー）で、"
         "上昇トレンドがどれだけ「確立」しているかを判定します。"
@@ -1866,6 +1872,70 @@ def pct_arrow(v):
     return "―"
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def compute_heatmap_data(df: pd.DataFrame, start: dt.date, end: dt.date) -> pd.DataFrame:
+    """マーケットヒートマップ用に、dfに含まれる全銘柄の期間騰落率と、ブロックの大きさの目安となる
+    直近の売買代金（終値×出来高）を、1回のバッチ取得（yf.download）でまとめて計算する。
+    時価総額ベースのサイズ付けは銘柄ごとに個別のinfo取得が必要になり、対象銘柄数が多いと
+    極端に遅くなる（compute_sector_momentumで判明した問題と同じ）ため、ここでは同じ一括取得から
+    計算できる売買代金を大きさの目安として使う。"""
+    rows_df = df.drop_duplicates(subset="code")
+    tickers = [f"{c}.T" for c in rows_df["code"]]
+    if not tickers:
+        return pd.DataFrame(columns=["code", "name", "sector", "pct", "trade_value"])
+    try:
+        raw = yf.download(
+            tickers,
+            start=start - dt.timedelta(days=10),
+            end=end + dt.timedelta(days=1),
+            progress=False,
+            auto_adjust=False,
+            group_by="ticker",
+            threads=True,
+        )
+    except Exception:
+        return pd.DataFrame(columns=["code", "name", "sector", "pct", "trade_value"])
+
+    result_rows = []
+    for _, r in rows_df.iterrows():
+        code = r["code"]
+        ticker = f"{code}.T"
+        try:
+            if isinstance(raw.columns, pd.MultiIndex):
+                if ticker not in raw.columns.get_level_values(0):
+                    continue
+                hist = raw[ticker]
+            else:
+                hist = raw
+            hist = hist.dropna(subset=["Close"]) if "Close" in hist.columns else hist.dropna(how="all")
+        except Exception:
+            continue
+        if hist.empty:
+            continue
+
+        pct, _base_p, latest_p = pct_change_over_period(hist, start, end)
+        if pct is None:
+            continue
+
+        trade_value = None
+        if "Volume" in hist.columns and latest_p is not None:
+            latest_volume = hist["Volume"].dropna()
+            if not latest_volume.empty:
+                trade_value = float(latest_p) * float(latest_volume.iloc[-1])
+
+        result_rows.append(
+            {
+                "code": code,
+                "name": r["name"],
+                "sector": r["sector"],
+                "pct": pct,
+                "trade_value": trade_value,
+            }
+        )
+
+    return pd.DataFrame(result_rows)
+
+
 # ---------------------------------------------------------------------------
 # お気に入りグループの読み書き
 # ---------------------------------------------------------------------------
@@ -2178,6 +2248,110 @@ def render_trend_established_page(period_choice: str, start_date: dt.date, end_d
     st.caption(
         "※ 「伸びすぎ注意」が付いている銘柄は、短期的に上がりすぎている可能性があり、"
         "飛びつくと高値づかみになりやすいので注意してください。今後の値上がりを保証するものではありません。"
+    )
+
+
+# ---------------------------------------------------------------------------
+# マーケットヒートマップページ（サイドバーの「① どこを見る？」から切り替え）
+# ---------------------------------------------------------------------------
+def render_market_heatmap_page(period_choice: str, start_date: dt.date, end_date: dt.date):
+    """stocks.csvに登録した銘柄をセクターごとのブロックに並べ、色（騰落率）と大きさ（売買代金の目安）で
+    ひと目で確認できるヒートマップページ。対象は登録済みの全銘柄（低位株ページの候補は含まない）。"""
+    st.markdown(
+        """
+        <div class="app-header">
+            <h1>🗺️ マーケットヒートマップ</h1>
+            <p>登録銘柄をセクターごとのブロックで並べ、色と大きさで値動きを一覧できます。</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    scan_master = master.drop_duplicates(subset="code")
+    sector_n = scan_master["sector"].nunique()
+    st.caption(
+        f"対象: stocks.csvに登録済みの{len(scan_master)}銘柄・{sector_n}セクター"
+        f"（騰落率の期間: {period_choice}）。全上場銘柄ではなく、ご自身で登録した銘柄の中での比較です。"
+    )
+    st.caption("💡 " + GLOSSARY["マーケットヒートマップ"])
+
+    with st.spinner(f"{len(scan_master)}銘柄のデータを取得中…（銘柄数が多いため、数十秒〜1分程度かかることがあります）"):
+        heat_df = compute_heatmap_data(scan_master, start_date, end_date)
+
+    if heat_df.empty:
+        st.caption("ヒートマップ用のデータを取得できませんでした。時間を置いて再度お試しください。")
+        return
+
+    st.caption(f"データを取得できた銘柄: {len(heat_df)} / {len(scan_master)}")
+
+    # ブロックの大きさ（売買代金）が取得できなかった銘柄は、ブロックが消えてしまわないよう
+    # 取得できた銘柄の最小値を割り当てる（0だと treemap 上で見えなくなるため）。
+    valid_tv = heat_df["trade_value"].dropna()
+    fallback_tv = float(valid_tv.min()) if not valid_tv.empty else 1.0
+    heat_df = heat_df.copy()
+    heat_df["trade_value_filled"] = heat_df["trade_value"].fillna(fallback_tv)
+
+    sector_avg = heat_df.groupby("sector")["pct"].mean()
+
+    # 色のレンジは、極端な銘柄1つに引っ張られて他の差が見えなくなるのを避けるため、
+    # 上下±10%を目安の上限にして揃える（それを超える銘柄は上限色で表示される）。
+    color_cap = max(10.0, float(heat_df["pct"].abs().quantile(0.95)) if len(heat_df) > 1 else 10.0)
+
+    ids, labels, parents, values, colors, hover_texts = [], [], [], [], [], []
+    ids.append("ROOT")
+    labels.append("登録銘柄全体")
+    parents.append("")
+    values.append(0)
+    colors.append(0)
+    hover_texts.append("")
+
+    for sector, avg_pct in sector_avg.items():
+        ids.append(f"sector::{sector}")
+        labels.append(sector)
+        parents.append("ROOT")
+        values.append(0)
+        colors.append(avg_pct)
+        n_in_sector = int((heat_df["sector"] == sector).sum())
+        hover_texts.append(f"{sector}<br>平均騰落率: {avg_pct:+.2f}%（{n_in_sector}銘柄）")
+
+    for _, row in heat_df.iterrows():
+        ids.append(f"code::{row['code']}")
+        labels.append(f"{row['name']}<br>{row['pct']:+.1f}%")
+        parents.append(f"sector::{row['sector']}")
+        values.append(float(row["trade_value_filled"]))
+        colors.append(row["pct"])
+        tv_txt = f"{row['trade_value']:,.0f}円" if pd.notna(row["trade_value"]) else "―"
+        hover_texts.append(
+            f"{row['code']} {row['name']}<br>セクター: {row['sector']}<br>"
+            f"{period_choice}騰落率: {row['pct']:+.2f}%<br>売買代金目安: {tv_txt}"
+        )
+
+    fig = go.Figure(
+        go.Treemap(
+            ids=ids,
+            labels=labels,
+            parents=parents,
+            values=values,
+            branchvalues="remainder",
+            marker=dict(
+                colors=colors,
+                colorscale=[[0, DOWN_COLOR], [0.5, "#f0f0f0"], [1, UP_COLOR]],
+                cmid=0,
+                cmin=-color_cap,
+                cmax=color_cap,
+                showscale=True,
+                colorbar=dict(title="騰落率(%)"),
+            ),
+            hovertext=hover_texts,
+            hoverinfo="text",
+            textfont=dict(size=13),
+        )
+    )
+    fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=700)
+    st.plotly_chart(fig, use_container_width=True, key="market_heatmap_treemap")
+
+    st.caption(
+        "セクターのブロックの色は、そのセクター内の平均騰落率です。個別銘柄のブロックをクリックすると拡大できます。"
     )
 
 
@@ -2553,7 +2727,7 @@ st.sidebar.caption("上から順番に選んでいくだけで表示が切り替
 st.sidebar.markdown("### ① どこを見る？")
 page_mode = st.sidebar.radio(
     "ページを選ぶ",
-    ["📊 メインダッシュボード", "🔍 低位株・無名株分析", "🎯 ルール適合銘柄一覧", "📈 トレンド確立銘柄一覧"],
+    ["📊 メインダッシュボード", "🔍 低位株・無名株分析", "🎯 ルール適合銘柄一覧", "📈 トレンド確立銘柄一覧", "🗺️ マーケットヒートマップ"],
     key="page_mode_select",
     label_visibility="collapsed",
 )
@@ -2891,6 +3065,10 @@ if page_mode == "🎯 ルール適合銘柄一覧":
 
 if page_mode == "📈 トレンド確立銘柄一覧":
     render_trend_established_page(period_choice, start_date, end_date)
+    st.stop()
+
+if page_mode == "🗺️ マーケットヒートマップ":
+    render_market_heatmap_page(period_choice, start_date, end_date)
     st.stop()
 
 # ---------------------------------------------------------------------------
