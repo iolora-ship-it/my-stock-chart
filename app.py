@@ -59,6 +59,7 @@ if _qp_jump_sector:
 
 STOCKS_CSV = "stocks.csv"
 LOWPRICE_CSV = "lowprice_stocks.csv"
+MARKET_SCAN_CSV = "market_scan_results.csv"
 GROUPS_FILE = "groups.json"
 PORTFOLIO_FILE = "portfolio.json"
 TRADES_FILE = "trades.json"
@@ -135,6 +136,26 @@ GLOSSARY = {
         "色は国内の値動き表示の慣習に合わせて、上昇=赤、下落=青にしています（海外の投資ツールでは逆の配色が多いので注意）。"
         "ブロックの大きさは時価総額ではなく、直近の売買代金（終値×出来高）の目安です"
         "（時価総額だと銘柄ごとに別途データ取得が必要になり、登録銘柄数が多いと表示が大きく遅くなるため）。"
+    ),
+    "市場スキャン": (
+        "東証の全上場銘柄（ETF・REIT・PRO Marketなどを除く約3,700銘柄）を対象に、"
+        "GitHub Actionsで毎晩自動的にスキャンし、株価3,000円以下の銘柄の中から次の3パターンのいずれかに"
+        "該当した銘柄だけをリストアップしたものです。アプリを開いた瞬間にスキャンしているわけではなく、"
+        "前夜までのバッチ処理の結果を表示しています。"
+    ),
+    "静かな出来高増加（市場スキャン）": (
+        "値動きはほとんど変わらないのに、出来高だけ普段より増えている状態です。"
+        "メインダッシュボードの同名バッジ（時価総額500億円以上が対象）と判定ロジックは同じですが、"
+        "市場スキャンでは低位株も対象にするため、時価総額によるフィルタは外しています。"
+    ),
+    "出来高急増（市場スキャン）": (
+        "直近の出来高が、それ以前の平均出来高に対して急に増えている状態です。"
+        "値動きの大きさは問わず、出来高の変化だけを見て判定しています。"
+    ),
+    "新規上場の可能性（市場スキャン）": (
+        "yfinanceから取得できる価格データの開始日が、直近およそ半年以内の銘柄です。"
+        "銘柄ごとに正確な上場日を取得するのは数が多く非現実的なため、取得できたデータの長さを代わりの目安にしています。"
+        "データが取得しづらいだけの銘柄も同じ見え方になるため、必ずしも正確なIPO日ではない点にご注意ください。"
     ),
     "トレンド確立度": (
         "5日・25日・75日移動平均線の並び順（短期>中期>長期＝パーフェクトオーダー）で、"
@@ -634,6 +655,16 @@ def inject_style():
             color: #be185d;
             margin-left: 6px;
         }
+        .stock-card .badge-vol-spike {
+            background: #fff4e0;
+            color: #b4530a;
+            margin-left: 6px;
+        }
+        .stock-card .badge-newlisting {
+            background: #e0f2fe;
+            color: #0369a1;
+            margin-left: 6px;
+        }
         /* 決算間近・52週高値圏・信用倍率急増・大量保有報告書・静かな出来高増加は、判断に直結するバッジと違い
            あくまで参考情報のため、増えすぎてカードが見づらくならないよう折りたたみにまとめる。
            <details>/<summary>はJS不要のブラウザ標準機能で、st.markdown(unsafe_allow_html)でも
@@ -812,7 +843,9 @@ def inject_style():
             .stock-card .badge-high52w,
             .stock-card .badge-margin-spike,
             .stock-card .badge-edinet,
-            .stock-card .badge-quiet-accum {
+            .stock-card .badge-quiet-accum,
+            .stock-card .badge-vol-spike,
+            .stock-card .badge-newlisting {
                 margin-left: 0;
                 margin-right: 6px;
             }
@@ -2701,6 +2734,158 @@ def render_lowprice_page(
 
 
 # ---------------------------------------------------------------------------
+# 市場スキャンページ（東証全銘柄を対象にした夜間バッチの結果を表示する）
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_market_scan_results() -> pd.DataFrame:
+    """scripts/scan_market.pyがGitHub Actionsで毎晩書き出すmarket_scan_results.csvを読み込む。
+    ファイルが存在しない・空の場合は、呼び出し側で「まだスキャン結果がありません」と案内する。"""
+    try:
+        df = pd.read_csv(MARKET_SCAN_CSV, dtype={"code": str})
+    except (FileNotFoundError, pd.errors.EmptyDataError):
+        return pd.DataFrame()
+    if df.empty:
+        return df
+    for col in ("signal_quiet", "signal_spike", "signal_newlisting"):
+        if col in df.columns:
+            df[col] = df[col].astype(bool)
+    return df
+
+
+def render_market_scan_page(period_choice: str, start_date: dt.date, end_date: dt.date, today_local: dt.date):
+    """市場スキャンページ本体。stocks.csvには登録していない銘柄も含めて、東証の全上場銘柄
+    （ETF・REITなどを除く約3,700銘柄）の中から、GitHub Actionsの夜間バッチが
+    「まだ注目されていなさそうな低位株」として検出した銘柄を一覧表示する。"""
+    st.markdown(
+        """
+        <div class="app-header">
+            <h1>🕵️ 市場スキャン（低位株発掘）</h1>
+            <p>東証の全上場銘柄を対象に、毎晩自動で「まだ注目されていなさそうな低位株」を探した結果です。</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.caption("💡 " + GLOSSARY["市場スキャン"])
+
+    df_scan = load_market_scan_results()
+
+    if df_scan.empty:
+        st.info(
+            "まだスキャン結果がありません。このページはGitHub Actionsで毎晩自動実行される"
+            "バッチ処理（scripts/scan_market.py）の結果ファイルを表示する仕組みのため、"
+            "初回のバッチが実行されるまでお待ちください（平日の東証取引終了後、日本時間18時頃に自動実行されます。"
+            "Actionsの画面から手動実行することもできます）。"
+        )
+        return
+
+    scan_date = df_scan["scan_date"].iloc[0] if "scan_date" in df_scan.columns and not df_scan.empty else "不明"
+    st.caption(
+        f"📅 スキャン実行日: {scan_date}　/　該当銘柄数: {len(df_scan)}銘柄"
+        "（株価3,000円以下かつ、平均売買代金が極端に少なすぎない銘柄が対象）"
+    )
+
+    st.markdown("### 🔧 絞り込み条件")
+    fc1, fc2 = st.columns(2)
+    with fc1:
+        signal_options = st.multiselect(
+            "注目シグナルで絞り込み（未選択時はすべて表示）",
+            ["🔍 静かな出来高増加", "📊 出来高急増", "🆕 新規上場の可能性"],
+        )
+    with fc2:
+        price_max_scan = st.slider(
+            "株価 上限（円）", min_value=50, max_value=3000, value=3000, step=50,
+            key="market_scan_price_max",
+        )
+
+    filtered = df_scan[df_scan["price"] <= price_max_scan].copy()
+    if signal_options:
+        mask = pd.Series(False, index=filtered.index)
+        if "🔍 静かな出来高増加" in signal_options:
+            mask |= filtered["signal_quiet"]
+        if "📊 出来高急増" in signal_options:
+            mask |= filtered["signal_spike"]
+        if "🆕 新規上場の可能性" in signal_options:
+            mask |= filtered["signal_newlisting"]
+        filtered = filtered[mask]
+
+    if filtered.empty:
+        st.warning("条件に一致する銘柄がありませんでした。絞り込み条件を緩めてみてください。")
+        return
+
+    filtered = filtered.sort_values("avg_value", ascending=True)  # 薄商い＝注目度が低そうな銘柄を上位に
+    st.caption(f"表示中: {len(filtered)} / {len(df_scan)} 銘柄")
+    st.caption("💡 バッジにカーソルを合わせると、検出理由が表示されます。")
+
+    for _, r in filtered.iterrows():
+        yahoo_url = f"https://finance.yahoo.co.jp/quote/{r['code']}.T"
+        mcap_hint = format_trading_value(r["avg_value"]) if pd.notna(r["avg_value"]) else "―"
+
+        badges = []
+        if r.get("signal_quiet"):
+            tooltip = f"{r.get('quiet_reason', '')}。{GLOSSARY['静かな出来高増加（市場スキャン）']}"
+            badges.append(f'<span class="badge badge-quiet-accum" title="{tooltip}">🔍 静かな出来高増加</span>')
+        if r.get("signal_spike"):
+            tooltip = f"{r.get('spike_reason', '')}。{GLOSSARY['出来高急増（市場スキャン）']}"
+            badges.append(f'<span class="badge badge-vol-spike" title="{tooltip}">📊 出来高急増</span>')
+        if r.get("signal_newlisting"):
+            tooltip = f"{r.get('newlisting_reason', '')}。{GLOSSARY['新規上場の可能性（市場スキャン）']}"
+            badges.append(f'<span class="badge badge-newlisting" title="{tooltip}">🆕 新規上場の可能性</span>')
+        badges_html = "".join(badges)
+
+        render_html(
+            f"""
+            <div class="stock-card">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div>
+                        <span class="name">{r['name']}</span>
+                        <span class="code">{r['code']}</span>
+                        <div class="price">{r['price']:.1f}円</div>
+                        <a class="yahoo-link" href="{yahoo_url}" target="_blank" rel="noopener noreferrer">Yahoo!ファイナンスで見る →</a>
+                    </div>
+                    <div style="text-align:right;">
+                        <span class="badge badge-none">🏷 {r.get('sector33', '―')}</span>
+                        <span class="badge badge-none" title="{GLOSSARY['出来高']}">{mcap_hint}/日</span>
+                        {badges_html}
+                    </div>
+                </div>
+            </div>
+            """
+        )
+
+        detail_key = f"marketscan_detail_{r['code']}"
+        if detail_key not in st.session_state:
+            st.session_state[detail_key] = False
+        toggle_label = "📉 詳細を閉じる" if st.session_state[detail_key] else "📊 詳しく見る（チャート・分析）"
+        if st.button(toggle_label, key=f"marketscan_detail_btn_{r['code']}", use_container_width=True):
+            st.session_state[detail_key] = not st.session_state[detail_key]
+            st.rerun()
+
+        if st.session_state[detail_key]:
+            with st.container(border=True):
+                code, name = r["code"], r["name"]
+                hist_for_pct = fetch_history(code, start_date, end_date)
+                pct, base_p, latest_p = pct_change_over_period(hist_for_pct, start_date, end_date)
+                trend_status = compute_trend_status(code)
+                entry_quality = compute_entry_quality(code)
+                spec_level, spec_reason = detect_speculative_signal(code)
+                detail_row = {
+                    "pct": pct, "base_p": base_p, "latest_p": latest_p,
+                    "trend_status": trend_status, "entry_quality": entry_quality,
+                    "spec_level": spec_level, "spec_reason": spec_reason,
+                }
+                _render_lowprice_detail(code, name, detail_row, period_choice, today_local)
+
+        st.markdown("")
+
+    st.caption(
+        "⚠ このページの銘柄は時価総額や事業内容によるスクリーニングを行っていません"
+        "（低位株ページの候補リストとは異なり、機械的な出来高シグナルのみで抽出しています）。"
+        "薄商いの銘柄や、上場間もなく実績の少ない銘柄も含まれるため、値動きが荒くなりやすい点にご注意のうえご自身で判断してください。"
+    )
+    st.caption("👈 メインダッシュボードに戻るには、左のサイドバーの「表示するページ」を切り替えてください。")
+
+
+# ---------------------------------------------------------------------------
 # 画面構築
 # ---------------------------------------------------------------------------
 inject_style()
@@ -2727,7 +2912,7 @@ st.sidebar.caption("上から順番に選んでいくだけで表示が切り替
 st.sidebar.markdown("### ① どこを見る？")
 page_mode = st.sidebar.radio(
     "ページを選ぶ",
-    ["📊 メインダッシュボード", "🔍 低位株・無名株分析", "🎯 ルール適合銘柄一覧", "📈 トレンド確立銘柄一覧", "🗺️ マーケットヒートマップ"],
+    ["📊 メインダッシュボード", "🔍 低位株・無名株分析", "🎯 ルール適合銘柄一覧", "📈 トレンド確立銘柄一覧", "🗺️ マーケットヒートマップ", "🕵️ 市場スキャン"],
     key="page_mode_select",
     label_visibility="collapsed",
 )
@@ -3069,6 +3254,10 @@ if page_mode == "📈 トレンド確立銘柄一覧":
 
 if page_mode == "🗺️ マーケットヒートマップ":
     render_market_heatmap_page(period_choice, start_date, end_date)
+    st.stop()
+
+if page_mode == "🕵️ 市場スキャン":
+    render_market_scan_page(period_choice, start_date, end_date, today)
     st.stop()
 
 # ---------------------------------------------------------------------------
