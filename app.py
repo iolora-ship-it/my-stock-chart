@@ -2769,6 +2769,8 @@ def render_market_scan_page(period_choice: str, start_date: dt.date, end_date: d
     """市場スキャン（全市場自動スキャン）タブの本体。stocks.csvには登録していない銘柄も含めて、東証の全上場銘柄
     （ETF・REITなどを除く約3,700銘柄）の中から、GitHub Actionsの夜間バッチが
     「まだ注目されていなさそうな低位株」として検出した銘柄を一覧表示する。
+    業種（33業種）でフィルタ・グループ表示できるので、出来高シグナルだけでなく事業内容も見比べながら
+    仕手株っぽい銘柄かどうかを自分で判断しやすくしている（自動判定はしていない）。
     「🔍 低位株を探す」ページの候補ソース切り替えから呼び出される（render_lowprice_hub_page参照）。"""
     st.markdown("#### 🌐 全市場自動スキャンから探す")
     st.caption("東証の全上場銘柄を対象に、毎晩自動で「まだ注目されていなさそうな低位株」を探した結果です。")
@@ -2792,7 +2794,7 @@ def render_market_scan_page(period_choice: str, start_date: dt.date, end_date: d
     )
 
     st.markdown("### 🔧 絞り込み条件")
-    fc1, fc2 = st.columns(2)
+    fc1, fc2, fc3 = st.columns(3)
     with fc1:
         signal_options = st.multiselect(
             "注目シグナルで絞り込み（未選択時はすべて表示）",
@@ -2802,6 +2804,14 @@ def render_market_scan_page(period_choice: str, start_date: dt.date, end_date: d
         price_max_scan = st.slider(
             "株価 上限（円）", min_value=50, max_value=3000, value=3000, step=50,
             key="market_scan_price_max",
+        )
+    with fc3:
+        sectors_scan = sorted(df_scan["sector33"].dropna().unique().tolist()) if "sector33" in df_scan.columns else []
+        selected_sectors_scan = st.multiselect(
+            "業種（33業種）で絞り込み（未選択時は全業種）",
+            sectors_scan,
+            help="事業内容が分からない・判断しづらい業種の銘柄を除外したり、興味のある業種だけに絞り込むのに使えます。"
+            "出来高シグナルだけでなく業種も見ることで、仕手株っぽい値動きかどうかの手がかりにもなります。",
         )
 
     filtered = df_scan[df_scan["price"] <= price_max_scan].copy()
@@ -2814,6 +2824,8 @@ def render_market_scan_page(period_choice: str, start_date: dt.date, end_date: d
         if "🆕 新規上場の可能性" in signal_options:
             mask |= filtered["signal_newlisting"]
         filtered = filtered[mask]
+    if selected_sectors_scan:
+        filtered = filtered[filtered["sector33"].isin(selected_sectors_scan)]
 
     if filtered.empty:
         st.warning("条件に一致する銘柄がありませんでした。絞り込み条件を緩めてみてください。")
@@ -2821,72 +2833,79 @@ def render_market_scan_page(period_choice: str, start_date: dt.date, end_date: d
 
     filtered = filtered.sort_values("avg_value", ascending=True)  # 薄商い＝注目度が低そうな銘柄を上位に
     st.caption(f"表示中: {len(filtered)} / {len(df_scan)} 銘柄")
-    st.caption("💡 バッジにカーソルを合わせると、検出理由が表示されます。")
+    st.caption("💡 バッジにカーソルを合わせると、検出理由が表示されます。業種ごとにグループ分けして表示しているので、事業内容のイメージがつかみやすい銘柄から見てみてください。")
 
-    for _, r in filtered.iterrows():
-        yahoo_url = f"https://finance.yahoo.co.jp/quote/{r['code']}.T"
-        mcap_hint = format_trading_value(r["avg_value"]) if pd.notna(r["avg_value"]) else "―"
+    sector_groups = filtered.groupby("sector33", sort=True, dropna=False)
+    for sector_name, group in sector_groups:
+        sector_label = sector_name if pd.notna(sector_name) and str(sector_name).strip() else "業種不明"
+        st.markdown(f"##### 🏷 {sector_label}（{len(group)}銘柄）")
 
-        badges = []
-        if r.get("signal_quiet"):
-            tooltip = f"{r.get('quiet_reason', '')}。{GLOSSARY['静かな出来高増加（市場スキャン）']}"
-            badges.append(f'<span class="badge badge-quiet-accum" title="{tooltip}">🔍 静かな出来高増加</span>')
-        if r.get("signal_spike"):
-            tooltip = f"{r.get('spike_reason', '')}。{GLOSSARY['出来高急増（市場スキャン）']}"
-            badges.append(f'<span class="badge badge-vol-spike" title="{tooltip}">📊 出来高急増</span>')
-        if r.get("signal_newlisting"):
-            tooltip = f"{r.get('newlisting_reason', '')}。{GLOSSARY['新規上場の可能性（市場スキャン）']}"
-            badges.append(f'<span class="badge badge-newlisting" title="{tooltip}">🆕 新規上場の可能性</span>')
-        badges_html = "".join(badges)
+        for _, r in group.iterrows():
+            yahoo_url = f"https://finance.yahoo.co.jp/quote/{r['code']}.T"
+            mcap_hint = format_trading_value(r["avg_value"]) if pd.notna(r["avg_value"]) else "―"
 
-        render_html(
-            f"""
-            <div class="stock-card">
-                <div style="display:flex; justify-content:space-between; align-items:center;">
-                    <div>
-                        <span class="name">{r['name']}</span>
-                        <span class="code">{r['code']}</span>
-                        <div class="price">{r['price']:.1f}円</div>
-                        <a class="yahoo-link" href="{yahoo_url}" target="_blank" rel="noopener noreferrer">Yahoo!ファイナンスで見る →</a>
-                    </div>
-                    <div style="text-align:right;">
-                        <span class="badge badge-none">🏷 {r.get('sector33', '―')}</span>
-                        <span class="badge badge-none" title="{GLOSSARY['出来高']}">{mcap_hint}/日</span>
-                        {badges_html}
+            badges = []
+            if r.get("signal_quiet"):
+                tooltip = f"{r.get('quiet_reason', '')}。{GLOSSARY['静かな出来高増加（市場スキャン）']}"
+                badges.append(f'<span class="badge badge-quiet-accum" title="{tooltip}">🔍 静かな出来高増加</span>')
+            if r.get("signal_spike"):
+                tooltip = f"{r.get('spike_reason', '')}。{GLOSSARY['出来高急増（市場スキャン）']}"
+                badges.append(f'<span class="badge badge-vol-spike" title="{tooltip}">📊 出来高急増</span>')
+            if r.get("signal_newlisting"):
+                tooltip = f"{r.get('newlisting_reason', '')}。{GLOSSARY['新規上場の可能性（市場スキャン）']}"
+                badges.append(f'<span class="badge badge-newlisting" title="{tooltip}">🆕 新規上場の可能性</span>')
+            badges_html = "".join(badges)
+
+            render_html(
+                f"""
+                <div class="stock-card">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <div>
+                            <span class="name">{r['name']}</span>
+                            <span class="code">{r['code']}</span>
+                            <div class="price">{r['price']:.1f}円</div>
+                            <a class="yahoo-link" href="{yahoo_url}" target="_blank" rel="noopener noreferrer">Yahoo!ファイナンスで見る →</a>
+                        </div>
+                        <div style="text-align:right;">
+                            <span class="badge badge-none" title="{GLOSSARY['出来高']}">{mcap_hint}/日</span>
+                            {badges_html}
+                        </div>
                     </div>
                 </div>
-            </div>
-            """
-        )
+                """
+            )
 
-        detail_key = f"marketscan_detail_{r['code']}"
-        if detail_key not in st.session_state:
-            st.session_state[detail_key] = False
-        toggle_label = "📉 詳細を閉じる" if st.session_state[detail_key] else "📊 詳しく見る（チャート・分析）"
-        if st.button(toggle_label, key=f"marketscan_detail_btn_{r['code']}", use_container_width=True):
-            st.session_state[detail_key] = not st.session_state[detail_key]
-            st.rerun()
+            detail_key = f"marketscan_detail_{r['code']}"
+            if detail_key not in st.session_state:
+                st.session_state[detail_key] = False
+            toggle_label = "📉 詳細を閉じる" if st.session_state[detail_key] else "📊 詳しく見る（チャート・分析）"
+            if st.button(toggle_label, key=f"marketscan_detail_btn_{r['code']}", use_container_width=True):
+                st.session_state[detail_key] = not st.session_state[detail_key]
+                st.rerun()
 
-        if st.session_state[detail_key]:
-            with st.container(border=True):
-                code, name = r["code"], r["name"]
-                hist_for_pct = fetch_history(code, start_date, end_date)
-                pct, base_p, latest_p = pct_change_over_period(hist_for_pct, start_date, end_date)
-                trend_status = compute_trend_status(code)
-                entry_quality = compute_entry_quality(code)
-                spec_level, spec_reason = detect_speculative_signal(code)
-                detail_row = {
-                    "pct": pct, "base_p": base_p, "latest_p": latest_p,
-                    "trend_status": trend_status, "entry_quality": entry_quality,
-                    "spec_level": spec_level, "spec_reason": spec_reason,
-                }
-                _render_lowprice_detail(code, name, detail_row, period_choice, today_local)
+            if st.session_state[detail_key]:
+                with st.container(border=True):
+                    code, name = r["code"], r["name"]
+                    hist_for_pct = fetch_history(code, start_date, end_date)
+                    pct, base_p, latest_p = pct_change_over_period(hist_for_pct, start_date, end_date)
+                    trend_status = compute_trend_status(code)
+                    entry_quality = compute_entry_quality(code)
+                    spec_level, spec_reason = detect_speculative_signal(code)
+                    detail_row = {
+                        "pct": pct, "base_p": base_p, "latest_p": latest_p,
+                        "trend_status": trend_status, "entry_quality": entry_quality,
+                        "spec_level": spec_level, "spec_reason": spec_reason,
+                    }
+                    _render_lowprice_detail(code, name, detail_row, period_choice, today_local)
 
-        st.markdown("")
+            st.markdown("")
+
+        st.markdown("---")
 
     st.caption(
         "⚠ このページの銘柄は時価総額や事業内容によるスクリーニングを行っていません"
         "（厳選リストとは異なり、機械的な出来高シグナルのみで抽出しています）。"
+        "業種分けはあくまで事業内容を把握しやすくするための表示上の工夫で、仕手株かどうかを自動判定しているわけではありません。"
         "薄商いの銘柄や、上場間もなく実績の少ない銘柄も含まれるため、値動きが荒くなりやすい点にご注意のうえご自身で判断してください。"
     )
 
